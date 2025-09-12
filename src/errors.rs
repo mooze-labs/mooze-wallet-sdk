@@ -21,7 +21,17 @@ pub enum WalletError {
     #[error("SDK error: {0}")]
     SdkError(String),
     #[error("Transaction")]
-    Transaction(#[from] TransactionError)
+    Transaction(#[from] TransactionError),
+    #[error("Context initialization failed: {context} - {reason}")]
+    ContextInitializationFailed { context: String, reason: String },
+    #[error("Multiple context failures: {0}")]
+    MultipleContextFailures(String),
+    #[error("Unsupported payment: {blockchain:?} with {payment_type}")]
+    UnsupportedPayment { blockchain: crate::models::Blockchain, payment_type: String },
+    #[error("Invalid address format: {address}")]
+    InvalidAddress { address: String },
+    #[error("All payment methods failed for amount {amount}")]
+    AllPaymentMethodsFailed { amount: u64 }
 }
 
 #[derive(Debug, Error)]
@@ -40,6 +50,12 @@ pub enum TransactionError {
     InvoiceAmountRequired,
     #[error("Insufficient funds.")]
     InsufficientFunds,
+    #[error("Insufficient funds in {context}: available {available}, required {required}")]
+    InsufficientFundsDetailed { context: String, available: u64, required: u64 },
+    #[error("Transaction ID validation failed: {txid}")]
+    InvalidTransactionId { txid: String },
+    #[error("Payment preparation failed in all contexts")]
+    PaymentPreparationFailed,
 }
 
 #[derive(Debug, Error)]
