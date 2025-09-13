@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
+use log::warn;
 
 use crate::clients::{WalletClient, bitcoin::BitcoinCtx, breez::BreezCtx, liquid::LwkCtx};
 use crate::errors::WalletError;
@@ -56,14 +57,38 @@ impl UnifiedWallet {
         mnemonic: &str,
         config: &WalletConfig,
     ) -> Result<Self, WalletError> {
-        let bitcoin_ctx = Arc::new(BitcoinCtx::new(mnemonic, config)
+        let mnemonic = mnemonic.to_string();
+        let config = config.clone();
+        
+        // Spawn parallel threads for context creation
+        let bitcoin_handle = {
+            let mnemonic = mnemonic.clone();
+            let config = config.clone();
+            std::thread::spawn(move || {
+                BitcoinCtx::new(&mnemonic, &config)
+                    .map_err(|e| WalletError::SdkError(e.to_string()))
+            })
+        };
+        
+        let liquid_handle = {
+            let mnemonic = mnemonic.clone();
+            let config = config.clone();
+            std::thread::spawn(move || {
+                LwkCtx::new(&mnemonic, &config)
+                    .map_err(|e| WalletError::SdkError(e.to_string()))
+            })
+        };
+        
+        // Breez context creation is async, so handle it separately
+        let breez_ctx = Arc::new(BreezCtx::new(&mnemonic, &config).await
             .map_err(|e| WalletError::SdkError(e.to_string()))?);
         
-        let breez_ctx = Arc::new(BreezCtx::new(mnemonic, config).await
-            .map_err(|e| WalletError::SdkError(e.to_string()))?);
+        // Wait for the parallel threads to complete
+        let bitcoin_ctx = Arc::new(bitcoin_handle.join()
+            .map_err(|_| WalletError::SdkError("Bitcoin context creation thread panicked".to_string()))??);
             
-        let liquid_ctx = Arc::new(LwkCtx::new(mnemonic, config)
-            .map_err(|e| WalletError::SdkError(e.to_string()))?);
+        let liquid_ctx = Arc::new(liquid_handle.join()
+            .map_err(|_| WalletError::SdkError("Liquid context creation thread panicked".to_string()))??);
 
         UnifiedWallet::new(bitcoin_ctx, breez_ctx, liquid_ctx)
     }
@@ -104,26 +129,30 @@ impl UnifiedWallet {
         }
 
         // If some contexts failed but we have partial data, log warnings but continue
-        // In production, you might want to log these failures
+        if !failures.is_empty() {
+            for failure in &failures {
+                warn!("Context failure during balance retrieval: {}", failure);
+            }
+        }
         
         Ok(unified_balance)
     }
 
-    /// Create invoice based on requested asset
+    /// Create invoice based on requested blockchain
     pub async fn create_invoice(
         &self, 
         amount: Option<u64>, 
         description: Option<String>,
-        asset: Asset
+        blockchain: Blockchain
     ) -> Result<Invoice, WalletError> {
-        match asset {
-            Asset::BitcoinOnchain => {
+        match blockchain {
+            Blockchain::Bitcoin => {
                 self.bitcoin_ctx.create_invoice(amount, description).await
             },
-            Asset::BitcoinLayer2 => {
+            Blockchain::Lightning => {
                 self.breez_ctx.create_invoice(amount, description).await
             },
-            Asset::LiquidAsset(_) => {
+            Blockchain::Liquid => {
                 self.liquid_ctx.create_invoice(amount, description).await
             }
         }
@@ -134,17 +163,17 @@ impl UnifiedWallet {
         &self,
         destination: &str,
         amount: u64,
-        asset: Option<Asset>
+        blockchain: Option<Blockchain>
     ) -> Result<PaymentRequest, WalletError> {
-        let target_asset = asset.unwrap_or(Asset::BitcoinOnchain);
+        let target_blockchain = blockchain.unwrap_or(Blockchain::Bitcoin);
 
-        match target_asset {
-            Asset::BitcoinOnchain => {
+        match target_blockchain {
+            Blockchain::Bitcoin => {
                 // Check Bitcoin on-chain funds first
                 let bitcoin_balance = self.bitcoin_ctx.balance().await?;
                 if let Some(btc_amount) = bitcoin_balance.get(&Asset::BitcoinOnchain) {
                     if *btc_amount >= amount {
-                        return self.bitcoin_ctx.prepare_payment(destination, amount, Some(target_asset)).await;
+                        return self.bitcoin_ctx.prepare_payment(destination, amount, Some(Asset::BitcoinOnchain)).await;
                     }
                 }
 
@@ -169,11 +198,11 @@ impl UnifiedWallet {
                     }
                 }
             },
-            Asset::BitcoinLayer2 => {
-                self.breez_ctx.prepare_payment(destination, amount, Some(target_asset)).await
+            Blockchain::Lightning => {
+                self.breez_ctx.prepare_payment(destination, amount, Some(Asset::BitcoinLayer2)).await
             },
-            Asset::LiquidAsset(_) => {
-                self.liquid_ctx.prepare_payment(destination, amount, Some(target_asset)).await
+            Blockchain::Liquid => {
+                self.liquid_ctx.prepare_payment(destination, amount, Some(Asset::LiquidAsset("btc".to_string()))).await
             }
         }
     }
