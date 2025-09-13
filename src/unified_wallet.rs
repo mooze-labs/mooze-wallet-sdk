@@ -17,7 +17,116 @@ pub struct UnifiedWallet {
     liquid_ctx: Arc<LwkCtx>,
 }
 
+/// Builder pattern for creating UnifiedWallet instances
+pub struct UnifiedWalletBuilder {
+    bitcoin_ctx: Option<Arc<BitcoinCtx>>,
+    breez_ctx: Option<Arc<BreezCtx>>,
+    liquid_ctx: Option<Arc<LwkCtx>>,
+}
+
+impl UnifiedWalletBuilder {
+    /// Create a new builder instance
+    pub fn new() -> Self {
+        Self {
+            bitcoin_ctx: None,
+            breez_ctx: None,
+            liquid_ctx: None,
+        }
+    }
+
+    /// Set the Bitcoin context
+    pub fn with_bitcoin_context(mut self, bitcoin_ctx: Arc<BitcoinCtx>) -> Self {
+        self.bitcoin_ctx = Some(bitcoin_ctx);
+        self
+    }
+
+    /// Set the Breez context
+    pub fn with_breez_context(mut self, breez_ctx: Arc<BreezCtx>) -> Self {
+        self.breez_ctx = Some(breez_ctx);
+        self
+    }
+
+    /// Set the Liquid context
+    pub fn with_liquid_context(mut self, liquid_ctx: Arc<LwkCtx>) -> Self {
+        self.liquid_ctx = Some(liquid_ctx);
+        self
+    }
+
+    /// Build the UnifiedWallet instance
+    pub fn build(self) -> Result<UnifiedWallet, WalletError> {
+        let bitcoin_ctx = self.bitcoin_ctx.ok_or_else(|| {
+            WalletError::ContextInitializationFailed {
+                context: "Bitcoin".to_string(),
+                reason: "Bitcoin context not provided".to_string(),
+            }
+        })?;
+
+        let breez_ctx = self.breez_ctx.ok_or_else(|| {
+            WalletError::ContextInitializationFailed {
+                context: "Breez".to_string(),
+                reason: "Breez context not provided".to_string(),
+            }
+        })?;
+
+        let liquid_ctx = self.liquid_ctx.ok_or_else(|| {
+            WalletError::ContextInitializationFailed {
+                context: "Liquid".to_string(),
+                reason: "Liquid context not provided".to_string(),
+            }
+        })?;
+
+        Ok(UnifiedWallet {
+            bitcoin_ctx,
+            breez_ctx,
+            liquid_ctx,
+        })
+    }
+}
+
 impl UnifiedWallet {
+    /// Create a new builder for UnifiedWallet
+    pub fn builder() -> UnifiedWalletBuilder {
+        UnifiedWalletBuilder::new()
+    }
+
+    /// Validate address format for the given blockchain
+    fn validate_address(address: &str, blockchain: &Blockchain) -> Result<(), WalletError> {
+        match blockchain {
+            Blockchain::Bitcoin => {
+                // Basic Bitcoin address validation (simplified)
+                if address.starts_with("1") || address.starts_with("3") || address.starts_with("bc1") {
+                    if address.len() >= 26 && address.len() <= 62 {
+                        Ok(())
+                    } else {
+                        Err(WalletError::SdkError(format!("Invalid Bitcoin address length: {}", address)))
+                    }
+                } else {
+                    Err(WalletError::SdkError(format!("Invalid Bitcoin address format: {}", address)))
+                }
+            },
+            Blockchain::Lightning => {
+                // Lightning invoices start with ln
+                if address.starts_with("ln") && address.len() > 10 {
+                    Ok(())
+                } else {
+                    Err(WalletError::SdkError(format!("Invalid Lightning invoice format: {}", address)))
+                }
+            },
+            Blockchain::Liquid => {
+                // Liquid addresses are similar to Bitcoin but with different prefixes
+                if address.starts_with("lq1") || address.starts_with("VJL") || address.starts_with("VT") {
+                    if address.len() >= 26 && address.len() <= 90 {
+                        Ok(())
+                    } else {
+                        Err(WalletError::SdkError(format!("Invalid Liquid address length: {}", address)))
+                    }
+                } else {
+                    Err(WalletError::SdkError(format!("Invalid Liquid address format: {}", address)))
+                }
+            }
+        }
+    }
+
     /// Create UnifiedWallet from pre-created context instances
     /// Validates that all contexts are properly initialized
     pub fn new(
@@ -25,25 +134,8 @@ impl UnifiedWallet {
         breez_ctx: Arc<BreezCtx>,
         liquid_ctx: Arc<LwkCtx>,
     ) -> Result<Self, WalletError> {
-        // Validate contexts are not null/empty (basic Arc validation)
-        if Arc::strong_count(&bitcoin_ctx) == 0 {
-            return Err(WalletError::ContextInitializationFailed {
-                context: "Bitcoin".to_string(),
-                reason: "Invalid Arc reference".to_string(),
-            });
-        }
-        if Arc::strong_count(&breez_ctx) == 0 {
-            return Err(WalletError::ContextInitializationFailed {
-                context: "Breez".to_string(),
-                reason: "Invalid Arc reference".to_string(),
-            });
-        }
-        if Arc::strong_count(&liquid_ctx) == 0 {
-            return Err(WalletError::ContextInitializationFailed {
-                context: "Liquid".to_string(),
-                reason: "Invalid Arc reference".to_string(),
-            });
-        }
+        // Note: Arc validation is not needed here since we already hold valid references
+        // If contexts were invalid, they would have failed during creation
 
         Ok(UnifiedWallet {
             bitcoin_ctx,
@@ -98,8 +190,15 @@ impl UnifiedWallet {
         let mut unified_balance = HashMap::new();
         let mut failures = Vec::new();
 
-        // Get Bitcoin balance
-        match self.bitcoin_ctx.balance().await {
+        // Fetch balances from all contexts in parallel
+        let (bitcoin_result, breez_result, liquid_result) = tokio::join!(
+            self.bitcoin_ctx.balance(),
+            self.breez_ctx.balance(),
+            self.liquid_ctx.balance()
+        );
+
+        // Process Bitcoin balance result
+        match bitcoin_result {
             Ok(bitcoin_balance) => unified_balance.extend(bitcoin_balance),
             Err(e) => {
                 failures.push(format!("Bitcoin: {}", e));
@@ -107,16 +206,16 @@ impl UnifiedWallet {
             }
         }
 
-        // Get Breez (Lightning) balance
-        match self.breez_ctx.balance().await {
+        // Process Breez (Lightning) balance result
+        match breez_result {
             Ok(breez_balance) => unified_balance.extend(breez_balance),
             Err(e) => {
                 failures.push(format!("Breez: {}", e));
             }
         }
 
-        // Get Liquid balance
-        match self.liquid_ctx.balance().await {
+        // Process Liquid balance result
+        match liquid_result {
             Ok(liquid_balance) => unified_balance.extend(liquid_balance),
             Err(e) => {
                 failures.push(format!("Liquid: {}", e));
@@ -166,6 +265,9 @@ impl UnifiedWallet {
         blockchain: Option<Blockchain>
     ) -> Result<PaymentRequest, WalletError> {
         let target_blockchain = blockchain.unwrap_or(Blockchain::Bitcoin);
+
+        // Validate the destination address for the target blockchain
+        Self::validate_address(destination, &target_blockchain)?;
 
         match target_blockchain {
             Blockchain::Bitcoin => {
@@ -217,14 +319,20 @@ impl UnifiedWallet {
                 // Handle Breez on-chain payments (Liquid -> Bitcoin swaps)
                 match self.breez_ctx.finalize_onchain_transaction(prepare_response.clone(), &payment_request.payee.address).await {
                     Ok(send_response) => {
-                        let tx_id = send_response.payment.tx_id.unwrap_or_else(|| {
+                        let tx_id = send_response.payment.tx_id.or_else(|| {
                             // If no tx_id, try to get swap_id as fallback
                             match &send_response.payment.details {
-                                breez_sdk_liquid::model::PaymentDetails::Lightning { swap_id, .. } => swap_id.clone(),
-                                breez_sdk_liquid::model::PaymentDetails::Bitcoin { swap_id, .. } => swap_id.clone(),
-                                _ => "unknown".to_string()
+                                breez_sdk_liquid::model::PaymentDetails::Lightning { swap_id, .. } => {
+                                    if swap_id.is_empty() { None } else { Some(swap_id.clone()) }
+                                },
+                                breez_sdk_liquid::model::PaymentDetails::Bitcoin { swap_id, .. } => {
+                                    if swap_id.is_empty() { None } else { Some(swap_id.clone()) }
+                                },
+                                _ => None
                             }
-                        });
+                        }).ok_or_else(|| {
+                            WalletError::SdkError("No transaction ID or swap ID available for payment".to_string())
+                        })?;
                         Ok(tx_id)
                     },
                     Err(e) => Err(WalletError::SdkError(format!("Breez on-chain payment failed: {}", e)))
@@ -297,13 +405,20 @@ impl UnifiedWallet {
         // Add filtered Liquid transactions (no duplicates with Breez)
         unified_transactions.extend(filtered_liquid_txs);
 
-        // Sort transactions by timestamp (most recent first)
+        // Sort transactions by timestamp (most recent first), then by txid for deterministic ordering
         unified_transactions.sort_by(|a, b| {
             match (a.timestamp, b.timestamp) {
-                (Some(a_time), Some(b_time)) => b_time.cmp(&a_time),
+                (Some(a_time), Some(b_time)) => {
+                    let time_cmp = b_time.cmp(&a_time);
+                    if time_cmp == std::cmp::Ordering::Equal {
+                        a.txid.cmp(&b.txid) // Secondary sort by txid for deterministic ordering
+                    } else {
+                        time_cmp
+                    }
+                },
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
+                (None, None) => a.txid.cmp(&b.txid), // Sort by txid when both timestamps are None
             }
         });
 
@@ -393,13 +508,85 @@ mod tests {
 
     #[tokio::test]
     async fn test_balance_aggregation_partial_failure() {
-        // Test that if one context fails, the others still work
-        // and we get partial balance data
+        use std::collections::HashMap;
+        
+        let mut mock_bitcoin = MockBitcoinContext::new();
+        let mut mock_breez = MockBreezContext::new();
+        let mut mock_liquid = MockLiquidContext::new();
+        
+        // Bitcoin context succeeds
+        let mut bitcoin_balance = HashMap::new();
+        bitcoin_balance.insert(Asset::BitcoinOnchain, 100000);
+        mock_bitcoin.expect_balance()
+            .times(1)
+            .returning(move || Ok(bitcoin_balance.clone()));
+        
+        // Breez context fails
+        mock_breez.expect_balance()
+            .times(1)
+            .returning(|| Err(WalletError::ConnectionError("Breez offline".to_string())));
+        
+        // Liquid context succeeds
+        let mut liquid_balance = HashMap::new();
+        liquid_balance.insert(Asset::LiquidAsset("btc".to_string()), 50000);
+        mock_liquid.expect_balance()
+            .times(1)
+            .returning(move || Ok(liquid_balance.clone()));
+        
+        let wallet = UnifiedWallet {
+            bitcoin_ctx: Arc::new(mock_bitcoin),
+            breez_ctx: Arc::new(mock_breez),
+            liquid_ctx: Arc::new(mock_liquid),
+        };
+        
+        let result = wallet.balance().await;
+        
+        // Should succeed with partial data
+        assert!(result.is_ok());
+        let balances = result.unwrap();
+        assert_eq!(balances.len(), 2);
+        assert_eq!(*balances.get(&Asset::BitcoinOnchain).unwrap(), 100000);
+        assert_eq!(*balances.get(&Asset::LiquidAsset("btc".to_string())).unwrap(), 50000);
+        assert!(!balances.contains_key(&Asset::BitcoinLayer2));
     }
 
     #[tokio::test]
     async fn test_balance_aggregation_total_failure() {
-        // Test that if all contexts fail, we get MultipleContextFailures error
+        let mut mock_bitcoin = MockBitcoinContext::new();
+        let mut mock_breez = MockBreezContext::new();
+        let mut mock_liquid = MockLiquidContext::new();
+        
+        // All contexts fail
+        mock_bitcoin.expect_balance()
+            .times(1)
+            .returning(|| Err(WalletError::ConnectionError("Bitcoin offline".to_string())));
+        
+        mock_breez.expect_balance()
+            .times(1)
+            .returning(|| Err(WalletError::ConnectionError("Breez offline".to_string())));
+        
+        mock_liquid.expect_balance()
+            .times(1)
+            .returning(|| Err(WalletError::ConnectionError("Liquid offline".to_string())));
+        
+        let wallet = UnifiedWallet {
+            bitcoin_ctx: Arc::new(mock_bitcoin),
+            breez_ctx: Arc::new(mock_breez),
+            liquid_ctx: Arc::new(mock_liquid),
+        };
+        
+        let result = wallet.balance().await;
+        
+        // Should fail with MultipleContextFailures
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            WalletError::MultipleContextFailures(msg) => {
+                assert!(msg.contains("Bitcoin"));
+                assert!(msg.contains("Breez"));
+                assert!(msg.contains("Liquid"));
+            },
+            _ => panic!("Expected MultipleContextFailures error"),
+        }
     }
 
     #[tokio::test]
@@ -414,7 +601,46 @@ mod tests {
 
     #[tokio::test]
     async fn test_prepare_payment_bitcoin_insufficient_funds_breez_fallback() {
-        // Test Bitcoin payment falls back to Breez when insufficient Bitcoin funds
+        use crate::models::payments::PreparedPayment;
+        use breez_sdk_liquid::model::PreparePayOnchainResponse;
+        
+        let mut mock_bitcoin = MockBitcoinContext::new();
+        let mut mock_breez = MockBreezContext::new();
+        let mut mock_liquid = MockLiquidContext::new();
+        
+        // Bitcoin context returns insufficient balance
+        let mut bitcoin_balance = HashMap::new();
+        bitcoin_balance.insert(Asset::BitcoinOnchain, 1000); // Only 1000 sats available
+        mock_bitcoin.expect_balance()
+            .times(1)
+            .returning(move || Ok(bitcoin_balance.clone()));
+        
+        // Breez context succeeds with on-chain transaction
+        let prepare_response = PreparePayOnchainResponse {
+            fees_sat: 500,
+        };
+        mock_breez.expect_build_onchain_transaction()
+            .times(1)
+            .returning(move |_, _| Ok(prepare_response.clone()));
+        
+        let wallet = UnifiedWallet {
+            bitcoin_ctx: Arc::new(mock_bitcoin),
+            breez_ctx: Arc::new(mock_breez),
+            liquid_ctx: Arc::new(mock_liquid),
+        };
+        
+        let result = wallet.prepare_payment("bc1qtest", 5000, Some(Blockchain::Bitcoin)).await;
+        
+        // Should succeed with Breez fallback
+        assert!(result.is_ok());
+        let payment_request = result.unwrap();
+        assert_eq!(payment_request.blockchain, Blockchain::Bitcoin);
+        assert_eq!(payment_request.asset, Asset::BitcoinOnchain);
+        assert_eq!(payment_request.fee, 500);
+        match payment_request.prepared_payment {
+            PreparedPayment::PegOut(_) => {}, // Expected
+            _ => panic!("Expected PegOut prepared payment"),
+        }
     }
 
     #[tokio::test]
@@ -621,5 +847,41 @@ mod tests {
         let error_string = format!("{}", unsupported_payment);
         assert!(error_string.contains("Lightning"));
         assert!(error_string.contains("InvalidType"));
+    }
+
+    #[test]
+    fn test_builder_pattern_success() {
+        let mut mock_bitcoin = MockBitcoinContext::new();
+        let mut mock_breez = MockBreezContext::new();
+        let mut mock_liquid = MockLiquidContext::new();
+
+        let wallet_result = UnifiedWallet::builder()
+            .with_bitcoin_context(Arc::new(mock_bitcoin))
+            .with_breez_context(Arc::new(mock_breez))
+            .with_liquid_context(Arc::new(mock_liquid))
+            .build();
+
+        assert!(wallet_result.is_ok());
+    }
+
+    #[test]
+    fn test_builder_pattern_missing_context() {
+        let mut mock_bitcoin = MockBitcoinContext::new();
+        let mut mock_breez = MockBreezContext::new();
+
+        // Missing liquid context
+        let wallet_result = UnifiedWallet::builder()
+            .with_bitcoin_context(Arc::new(mock_bitcoin))
+            .with_breez_context(Arc::new(mock_breez))
+            .build();
+
+        assert!(wallet_result.is_err());
+        match wallet_result.unwrap_err() {
+            WalletError::ContextInitializationFailed { context, reason } => {
+                assert_eq!(context, "Liquid");
+                assert!(reason.contains("not provided"));
+            },
+            _ => panic!("Expected ContextInitializationFailed error"),
+        }
     }
 }

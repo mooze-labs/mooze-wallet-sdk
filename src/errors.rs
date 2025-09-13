@@ -14,7 +14,7 @@ pub enum WalletError {
     LiquidError(#[from] LwkError),
     #[error("Failed to retrieve balance: {0}")]
     BalanceUnavailable(String),
-    #[error("Not enough amount for chain swap operation. Requested: {0}. Minimum: {0}")]
+    #[error("Not enough amount for chain swap operation. Requested: {0}. Minimum: {1}")]
     PegAmountTooLow(u64, u64),
     #[error("Connection error: {0}")]
     ConnectionError(String),

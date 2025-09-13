@@ -273,7 +273,10 @@ pub async fn prepare_onchain_payment(sdk: Arc<LiquidSdk>, amount: u64) -> Result
 
 pub async fn pay_onchain(sdk: Arc<LiquidSdk>, prepare_response: PreparePayOnchainResponse, address: &str) -> Result<SendPaymentResponse, BreezError> {
     let payment = sdk.pay_onchain(
-        &PayOnchainRequest { address: address.to_string(), prepare_response }
+        &PayOnchainRequest { 
+            prepare_response,
+            recipient_address: address.to_string()
+        }
     ).await.map_err(|e| BreezError::SdkError(e.to_string()))?;
 
     Ok(payment)
