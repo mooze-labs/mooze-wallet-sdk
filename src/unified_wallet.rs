@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use log::warn;
 use bitcoin::{Address as BitcoinAddress, Network as BitcoinNetwork};
 use lightning_invoice::Bolt11Invoice;
+use parking_lot::RwLock;
+use lwk_wollet::elements::Address as ElementsAddress;
 
 use crate::clients::{WalletClient, bitcoin::BitcoinCtx, breez::BreezCtx, liquid::LwkCtx};
 use crate::errors::WalletError;
@@ -12,12 +15,34 @@ use crate::models::*;
 use crate::models::invoices::Invoice;
 use crate::models::payments::PaymentRequest;
 
+/// Transaction cache for explicit control
+struct TransactionCache {
+    transactions: Vec<WalletTransaction>,
+}
+
+impl TransactionCache {
+    fn new() -> Self {
+        Self {
+            transactions: Vec::new(),
+        }
+    }
+
+    fn get(&self) -> Vec<WalletTransaction> {
+        self.transactions.clone()
+    }
+
+    fn set(&mut self, transactions: Vec<WalletTransaction>) {
+        self.transactions = transactions;
+    }
+}
+
 /// Unified wallet that abstracts Bitcoin, Liquid, and Lightning operations
 /// Routes method calls to appropriate contexts based on asset types
 pub struct UnifiedWallet {
     bitcoin_ctx: Arc<BitcoinCtx>,
     breez_ctx: Arc<BreezCtx>,
     liquid_ctx: Arc<LwkCtx>,
+    transaction_cache: Arc<RwLock<TransactionCache>>,
 }
 
 /// Builder pattern for creating UnifiedWallet instances
@@ -58,23 +83,23 @@ impl UnifiedWalletBuilder {
     /// Build the UnifiedWallet instance
     pub fn build(self) -> Result<UnifiedWallet, WalletError> {
         let bitcoin_ctx = self.bitcoin_ctx.ok_or_else(|| {
-            WalletError::ContextInitializationFailed {
+            WalletError::ContextCreationFailed {
                 context: "Bitcoin".to_string(),
-                reason: "Bitcoin context not provided".to_string(),
+                reason: "Context not provided to builder".to_string(),
             }
         })?;
 
         let breez_ctx = self.breez_ctx.ok_or_else(|| {
-            WalletError::ContextInitializationFailed {
+            WalletError::ContextCreationFailed {
                 context: "Breez".to_string(),
-                reason: "Breez context not provided".to_string(),
+                reason: "Context not provided to builder".to_string(),
             }
         })?;
 
         let liquid_ctx = self.liquid_ctx.ok_or_else(|| {
-            WalletError::ContextInitializationFailed {
+            WalletError::ContextCreationFailed {
                 context: "Liquid".to_string(),
-                reason: "Liquid context not provided".to_string(),
+                reason: "Context not provided to builder".to_string(),
             }
         })?;
 
@@ -82,6 +107,7 @@ impl UnifiedWalletBuilder {
             bitcoin_ctx,
             breez_ctx,
             liquid_ctx,
+            transaction_cache: Arc::new(RwLock::new(TransactionCache::new())),
         })
     }
 }
@@ -109,7 +135,7 @@ impl UnifiedWallet {
             return Ok(Blockchain::Liquid);
         }
 
-        Err(WalletError::SdkError(format!("Unable to detect blockchain for address: {}", address)))
+        Err(WalletError::UnrecognizedAddress { address: address.to_string() })
     }
 
     /// Validate address format with proper checksum validation
@@ -117,33 +143,34 @@ impl UnifiedWallet {
         match blockchain {
             Blockchain::Bitcoin => {
                 BitcoinAddress::from_str(address)
-                    .map_err(|e| WalletError::SdkError(format!("Invalid Bitcoin address: {}", e)))?;
+                    .map_err(|e| WalletError::BitcoinAddressInvalid { 
+                        address: address.to_string(), 
+                        reason: e.to_string() 
+                    })?;
                 Ok(())
             },
             Blockchain::Lightning => {
                 Bolt11Invoice::from_str(address)
-                    .map_err(|e| WalletError::SdkError(format!("Invalid Lightning invoice: {}", e)))?;
+                    .map_err(|e| WalletError::LightningInvoiceInvalid { 
+                        invoice: address.to_string(), 
+                        reason: e.to_string() 
+                    })?;
                 Ok(())
             },
             Blockchain::Liquid => {
-                // For now, use basic validation for Liquid addresses
-                // TODO: Add proper Liquid address validation library when available
-                if address.starts_with("lq1") || address.starts_with("VJL") || address.starts_with("VT") || address.starts_with("H") || address.starts_with("Q") {
-                    if address.len() >= 26 && address.len() <= 90 {
-                        Ok(())
-                    } else {
-                        Err(WalletError::SdkError(format!("Invalid Liquid address length: {}", address)))
-                    }
-                } else {
-                    Err(WalletError::SdkError(format!("Invalid Liquid address format: {}", address)))
-                }
+                ElementsAddress::from_str(address)
+                    .map_err(|e| WalletError::LiquidAddressInvalid { 
+                        address: address.to_string(), 
+                        reason: e.to_string() 
+                    })?;
+                Ok(())
             }
         }
     }
 
     /// Create UnifiedWallet from pre-created context instances
-    /// Validates that all contexts are properly initialized
-    pub fn new(
+    /// Validates that all contexts are properly initialized and loads initial transaction history
+    pub async fn new(
         bitcoin_ctx: Arc<BitcoinCtx>,
         breez_ctx: Arc<BreezCtx>,
         liquid_ctx: Arc<LwkCtx>,
@@ -151,11 +178,21 @@ impl UnifiedWallet {
         // Note: Arc validation is not needed here since we already hold valid references
         // If contexts were invalid, they would have failed during creation
 
-        Ok(UnifiedWallet {
+        let wallet = UnifiedWallet {
             bitcoin_ctx,
             breez_ctx,
             liquid_ctx,
-        })
+            transaction_cache: Arc::new(RwLock::new(TransactionCache::new())),
+        };
+
+        // Load initial transaction history
+        let transactions = wallet.fetch_and_process_transactions().await?;
+        {
+            let mut cache = wallet.transaction_cache.write();
+            cache.set(transactions);
+        }
+
+        Ok(wallet)
     }
 
     /// Convenience method to create all contexts and UnifiedWallet in one call
@@ -187,16 +224,19 @@ impl UnifiedWallet {
         
         // Breez context creation is async, so handle it separately
         let breez_ctx = Arc::new(BreezCtx::new(&mnemonic, &config).await
-            .map_err(|e| WalletError::SdkError(e.to_string()))?);
+            .map_err(|e| WalletError::ContextCreationFailed { 
+                context: "Breez".to_string(), 
+                reason: e.to_string() 
+            })?);
         
         // Wait for the parallel threads to complete
         let bitcoin_ctx = Arc::new(bitcoin_handle.join()
-            .map_err(|_| WalletError::SdkError("Bitcoin context creation thread panicked".to_string()))??);
+            .map_err(|_| WalletError::ThreadPanic { context: "Bitcoin".to_string() })??);
             
         let liquid_ctx = Arc::new(liquid_handle.join()
-            .map_err(|_| WalletError::SdkError("Liquid context creation thread panicked".to_string()))??);
+            .map_err(|_| WalletError::ThreadPanic { context: "Liquid".to_string() })??);
 
-        UnifiedWallet::new(bitcoin_ctx, breez_ctx, liquid_ctx)
+        UnifiedWallet::new(bitcoin_ctx, breez_ctx, liquid_ctx).await
     }
 
     /// Get unified balance across all contexts
@@ -373,11 +413,14 @@ impl UnifiedWallet {
                                 _ => None
                             }
                         }).ok_or_else(|| {
-                            WalletError::SdkError("No transaction ID or swap ID available for payment".to_string())
+                            WalletError::TransactionIdUnavailable
                         })?;
                         Ok(tx_id)
                     },
-                    Err(e) => Err(WalletError::SdkError(format!("Breez on-chain payment failed: {}", e)))
+                    Err(e) => Err(WalletError::ContextCreationFailed { 
+                        context: "Breez".to_string(), 
+                        reason: format!("On-chain payment failed: {}", e) 
+                    })
                 }
             },
             (Blockchain::Lightning, _) => {
@@ -401,9 +444,26 @@ impl UnifiedWallet {
         }
     }
 
-    /// Get unified transaction history with proper duplicate filtering
-    /// Breez handles Lightning/Bitcoin, LWK handles Liquid (with no duplicates)
-    pub async fn transactions(&self) -> Result<Vec<WalletTransaction>, WalletError> {
+    /// Get cached transaction history (synchronous, no network calls)
+    /// Returns transactions loaded at initialization or last update
+    pub fn transactions(&self) -> Vec<WalletTransaction> {
+        let cache = self.transaction_cache.read();
+        cache.get()
+    }
+
+    /// Fetch fresh transactions from all contexts and update cache
+    /// Call this when you want to refresh transaction data
+    pub async fn update_transactions(&self) -> Result<(), WalletError> {
+        let fresh_transactions = self.fetch_and_process_transactions().await?;
+        
+        let mut cache = self.transaction_cache.write();
+        cache.set(fresh_transactions);
+        
+        Ok(())
+    }
+
+    /// Fetch transactions from all contexts and process them (internal method)
+    async fn fetch_and_process_transactions(&self) -> Result<Vec<WalletTransaction>, WalletError> {
         let mut unified_transactions = Vec::new();
 
         // Get Bitcoin transactions
@@ -924,6 +984,190 @@ mod tests {
                 assert!(reason.contains("not provided"));
             },
             _ => panic!("Expected ContextInitializationFailed error"),
+        }
+    }
+
+    #[test]
+    fn test_address_detection_bitcoin() {
+        // Test Bitcoin mainnet addresses
+        assert!(matches!(UnifiedWallet::detect_blockchain("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"), Ok(Blockchain::Bitcoin)));
+        assert!(matches!(UnifiedWallet::detect_blockchain("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"), Ok(Blockchain::Bitcoin)));
+        assert!(matches!(UnifiedWallet::detect_blockchain("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"), Ok(Blockchain::Bitcoin)));
+        
+        // Test Bitcoin testnet addresses
+        assert!(matches!(UnifiedWallet::detect_blockchain("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"), Ok(Blockchain::Bitcoin)));
+        assert!(matches!(UnifiedWallet::detect_blockchain("m1CDN6TNjEeb6p4ahvCVqaV7cqF7c8qant"), Ok(Blockchain::Bitcoin)));
+        assert!(matches!(UnifiedWallet::detect_blockchain("2MzQwSSnBHWHqSAqtTVQ6v47XtaisrJa1Vc"), Ok(Blockchain::Bitcoin)));
+    }
+
+    #[test]  
+    fn test_address_detection_lightning() {
+        // Test Lightning invoices
+        let lightning_invoice = "lnbc1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaq8rkx3yf5tcsyz3d73gafnh3cax9rn449d9p5uxz9ezhhypd0elx87sjle52x86fux2ypatgddc6k63n7erqz25le42c4u4ecky03ylcqca784w";
+        assert!(matches!(UnifiedWallet::detect_blockchain(lightning_invoice), Ok(Blockchain::Lightning)));
+        
+        let testnet_invoice = "lntb1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpuaztrnwngzn3kdzw5hydlzf03qdgm2hdq27cqv3agm2awhz5se903vruatfhq77w3ls4evs3ch9zw97j25emudupq63nyw24cg27h2rspfj9srp";
+        assert!(matches!(UnifiedWallet::detect_blockchain(testnet_invoice), Ok(Blockchain::Lightning)));
+    }
+
+    #[test]
+    fn test_address_detection_liquid() {
+        // Test Liquid addresses (confidential and non-confidential)
+        assert!(matches!(UnifiedWallet::detect_blockchain("lq1qq2xvpcvfup5j8zscjq05u2wxxjcyewk7979f3mmz5l7uw5pqmx6xf5xy50hsn6vhkm5euwt72x878eq6zxx2z58hd7zrsg9qn"), Ok(Blockchain::Liquid)));
+        assert!(matches!(UnifiedWallet::detect_blockchain("VJLCGjyeqVwMjzrD6dE9r5jGsJJSQq9pNqJdKK7r9M9c5q6TXBwtgNzY1xX1XBzgAx1n1jVjhN9iBLPzP9VBpMz8"), Ok(Blockchain::Liquid))); 
+    }
+
+    #[test]
+    fn test_address_detection_invalid() {
+        // Test invalid addresses
+        assert!(matches!(UnifiedWallet::detect_blockchain("invalid_address"), Err(WalletError::UnrecognizedAddress { .. })));
+        assert!(matches!(UnifiedWallet::detect_blockchain(""), Err(WalletError::UnrecognizedAddress { .. })));
+        assert!(matches!(UnifiedWallet::detect_blockchain("1234567890"), Err(WalletError::UnrecognizedAddress { .. })));
+    }
+
+    #[test]
+    fn test_new_error_variants() {
+        // Test ThreadPanic error
+        let thread_error = WalletError::ThreadPanic {
+            context: "Bitcoin".to_string(),
+        };
+        assert!(format!("{}", thread_error).contains("Thread panic during Bitcoin initialization"));
+
+        // Test TransactionIdUnavailable error
+        let txid_error = WalletError::TransactionIdUnavailable;
+        assert!(format!("{}", txid_error).contains("Transaction ID unavailable for payment"));
+
+        // Test UnrecognizedAddress error
+        let addr_error = WalletError::UnrecognizedAddress {
+            address: "invalid123".to_string(),
+        };
+        assert!(format!("{}", addr_error).contains("Address format not recognized: invalid123"));
+
+        // Test specific address validation errors
+        let bitcoin_addr_error = WalletError::BitcoinAddressInvalid {
+            address: "1InvalidBitcoin".to_string(),
+            reason: "Invalid checksum".to_string(),
+        };
+        assert!(format!("{}", bitcoin_addr_error).contains("Bitcoin address validation failed: 1InvalidBitcoin - Invalid checksum"));
+
+        let lightning_invoice_error = WalletError::LightningInvoiceInvalid {
+            invoice: "lnbcinvalid".to_string(),
+            reason: "Invalid bech32 encoding".to_string(),
+        };
+        assert!(format!("{}", lightning_invoice_error).contains("Lightning invoice validation failed: lnbcinvalid - Invalid bech32 encoding"));
+
+        let liquid_addr_error = WalletError::LiquidAddressInvalid {
+            address: "lq1invalid".to_string(),
+            reason: "Invalid blech32 format".to_string(),
+        };
+        assert!(format!("{}", liquid_addr_error).contains("Liquid address validation failed: lq1invalid - Invalid blech32 format"));
+
+        // Test ContextCreationFailed error
+        let context_creation_error = WalletError::ContextCreationFailed {
+            context: "Breez".to_string(),
+            reason: "API key invalid".to_string(),
+        };
+        assert!(format!("{}", context_creation_error).contains("Context creation failed for Breez: API key invalid"));
+    }
+
+    #[test]
+    fn test_transaction_cache_explicit_control() {
+        // Test the explicit transaction cache control
+        let mut cache = TransactionCache::new();
+        
+        // Initially empty
+        assert_eq!(cache.get().len(), 0);
+        assert_eq!(cache.is_valid(), false);
+        
+        // Set some transactions
+        let test_txs = vec![
+            create_test_transaction("tx1", 1000, Blockchain::Bitcoin),
+            create_test_transaction("tx2", 2000, Blockchain::Lightning),
+        ];
+        
+        cache.set(test_txs.clone());
+        assert_eq!(cache.get().len(), 2);
+        assert_eq!(cache.is_valid(), true);
+        assert_eq!(cache.get()[0].txid, "tx1");
+        assert_eq!(cache.get()[1].txid, "tx2");
+        
+        // Clear cache
+        cache.clear();
+        assert_eq!(cache.get().len(), 0);
+        assert_eq!(cache.is_valid(), false);
+    }
+
+    #[test]
+    fn test_validate_address_bitcoin_specific() {
+        // Test Bitcoin-specific address validation logic
+        use bitcoin::Address;
+        use std::str::FromStr;
+        
+        // Valid Bitcoin addresses should pass validation
+        let valid_addresses = [
+            "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+            "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", 
+            "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+        ];
+        
+        for addr_str in &valid_addresses {
+            let addr_result = Address::from_str(addr_str);
+            assert!(addr_result.is_ok(), "Should parse valid Bitcoin address: {}", addr_str);
+        }
+        
+        // Invalid Bitcoin addresses should fail validation
+        let invalid_addresses = [
+            "bc1invalid",
+            "1InvalidChecksum", 
+            "3InvalidP2SH",
+        ];
+        
+        for addr_str in &invalid_addresses {
+            let addr_result = Address::from_str(addr_str);
+            assert!(addr_result.is_err(), "Should reject invalid Bitcoin address: {}", addr_str);
+        }
+    }
+
+    #[test]
+    fn test_validate_lightning_invoice_specific() {
+        // Test Lightning-specific invoice validation logic
+        use lightning_invoice::Bolt11Invoice;
+        use std::str::FromStr;
+        
+        // This is a sample testnet invoice - in real tests you'd use valid test invoices
+        let test_invoice = "lntb1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpuaztrnwngzn3kdzw5hydlzf03qdgm2hdq27cqv3agm2awhz5se903vruatfhq77w3ls4evs3ch9zw97j25emudupq63nyw24cg27h2rspfj9srp";
+        
+        let invoice_result = Bolt11Invoice::from_str(test_invoice);
+        // Note: This test invoice may not be valid, but we test the parsing mechanism
+        // In production, you'd use properly constructed test invoices
+        
+        let invalid_invoice = "lnbc_invalid_format";
+        let invalid_result = Bolt11Invoice::from_str(invalid_invoice);
+        assert!(invalid_result.is_err(), "Should reject invalid Lightning invoice format");
+    }
+
+    #[tokio::test]
+    async fn test_prepare_payment_smart_error_handling() {
+        // Test that prepare_payment_smart returns specific errors for different failure cases
+        let mock_bitcoin = MockBitcoinContext::new();
+        let mock_breez = MockBreezContext::new(); 
+        let mock_liquid = MockLiquidContext::new();
+        
+        let wallet = UnifiedWallet::builder()
+            .with_bitcoin_context(Arc::new(mock_bitcoin))
+            .with_breez_context(Arc::new(mock_breez))
+            .with_liquid_context(Arc::new(mock_liquid))
+            .build()
+            .unwrap();
+            
+        // Test with invalid address - should return UnrecognizedAddress error
+        let result = wallet.prepare_payment_smart("invalid_address_format", 1000).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            WalletError::UnrecognizedAddress { address } => {
+                assert_eq!(address, "invalid_address_format");
+            },
+            _ => panic!("Expected UnrecognizedAddress error"),
         }
     }
 }

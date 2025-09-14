@@ -31,7 +31,21 @@ pub enum WalletError {
     #[error("Invalid address format: {address}")]
     InvalidAddress { address: String },
     #[error("All payment methods failed for amount {amount}")]
-    AllPaymentMethodsFailed { amount: u64 }
+    AllPaymentMethodsFailed { amount: u64 },
+    #[error("Thread panic during {context} initialization")]
+    ThreadPanic { context: String },
+    #[error("Transaction ID unavailable for payment")]
+    TransactionIdUnavailable,
+    #[error("Address format not recognized: {address}")]
+    UnrecognizedAddress { address: String },
+    #[error("Bitcoin address validation failed: {address} - {reason}")]
+    BitcoinAddressInvalid { address: String, reason: String },
+    #[error("Lightning invoice validation failed: {invoice} - {reason}")]
+    LightningInvoiceInvalid { invoice: String, reason: String },
+    #[error("Liquid address validation failed: {address} - {reason}")]
+    LiquidAddressInvalid { address: String, reason: String },
+    #[error("Context creation failed for {context}: {reason}")]
+    ContextCreationFailed { context: String, reason: String }
 }
 
 #[derive(Debug, Error)]
