@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::str::FromStr;
 use async_trait::async_trait;
 use log::warn;
+use bitcoin::{Address as BitcoinAddress, Network as BitcoinNetwork};
+use lightning_invoice::Bolt11Invoice;
 
 use crate::clients::{WalletClient, bitcoin::BitcoinCtx, breez::BreezCtx, liquid::LwkCtx};
 use crate::errors::WalletError;
@@ -89,32 +92,43 @@ impl UnifiedWallet {
         UnifiedWalletBuilder::new()
     }
 
-    /// Validate address format for the given blockchain
+    /// Detect blockchain from address format
+    fn detect_blockchain(address: &str) -> Result<Blockchain, WalletError> {
+        // Try Lightning invoice first (most specific)
+        if address.starts_with("lnbc") || address.starts_with("lntb") || address.starts_with("lnbcrt") {
+            return Ok(Blockchain::Lightning);
+        }
+
+        // Try Bitcoin address parsing
+        if let Ok(_) = BitcoinAddress::from_str(address) {
+            return Ok(Blockchain::Bitcoin);
+        }
+
+        // Try Liquid address (simplified detection)
+        if address.starts_with("lq1") || address.starts_with("VJL") || address.starts_with("VT") || address.starts_with("H") || address.starts_with("Q") {
+            return Ok(Blockchain::Liquid);
+        }
+
+        Err(WalletError::SdkError(format!("Unable to detect blockchain for address: {}", address)))
+    }
+
+    /// Validate address format with proper checksum validation
     fn validate_address(address: &str, blockchain: &Blockchain) -> Result<(), WalletError> {
         match blockchain {
             Blockchain::Bitcoin => {
-                // Basic Bitcoin address validation (simplified)
-                if address.starts_with("1") || address.starts_with("3") || address.starts_with("bc1") {
-                    if address.len() >= 26 && address.len() <= 62 {
-                        Ok(())
-                    } else {
-                        Err(WalletError::SdkError(format!("Invalid Bitcoin address length: {}", address)))
-                    }
-                } else {
-                    Err(WalletError::SdkError(format!("Invalid Bitcoin address format: {}", address)))
-                }
+                BitcoinAddress::from_str(address)
+                    .map_err(|e| WalletError::SdkError(format!("Invalid Bitcoin address: {}", e)))?;
+                Ok(())
             },
             Blockchain::Lightning => {
-                // Lightning invoices start with ln
-                if address.starts_with("ln") && address.len() > 10 {
-                    Ok(())
-                } else {
-                    Err(WalletError::SdkError(format!("Invalid Lightning invoice format: {}", address)))
-                }
+                Bolt11Invoice::from_str(address)
+                    .map_err(|e| WalletError::SdkError(format!("Invalid Lightning invoice: {}", e)))?;
+                Ok(())
             },
             Blockchain::Liquid => {
-                // Liquid addresses are similar to Bitcoin but with different prefixes
-                if address.starts_with("lq1") || address.starts_with("VJL") || address.starts_with("VT") {
+                // For now, use basic validation for Liquid addresses
+                // TODO: Add proper Liquid address validation library when available
+                if address.starts_with("lq1") || address.starts_with("VJL") || address.starts_with("VT") || address.starts_with("H") || address.starts_with("Q") {
                     if address.len() >= 26 && address.len() <= 90 {
                         Ok(())
                     } else {
@@ -257,7 +271,24 @@ impl UnifiedWallet {
         }
     }
 
-    /// Prepare payment with intelligent routing
+    /// Smart payment preparation with automatic blockchain detection
+    /// Auto-detects blockchain from address format and validates with proper checksums
+    pub async fn prepare_payment_smart(
+        &self,
+        destination: &str,
+        amount: u64,
+    ) -> Result<PaymentRequest, WalletError> {
+        // Auto-detect blockchain from address format
+        let detected_blockchain = Self::detect_blockchain(destination)?;
+        
+        // Validate with proper checksum validation
+        Self::validate_address(destination, &detected_blockchain)?;
+        
+        // Use the existing prepare_payment logic
+        self.prepare_payment_internal(destination, amount, detected_blockchain).await
+    }
+
+    /// Prepare payment with intelligent routing (manual blockchain specification)
     pub async fn prepare_payment(
         &self,
         destination: &str,
@@ -268,6 +299,17 @@ impl UnifiedWallet {
 
         // Validate the destination address for the target blockchain
         Self::validate_address(destination, &target_blockchain)?;
+        
+        self.prepare_payment_internal(destination, amount, target_blockchain).await
+    }
+
+    /// Internal payment preparation logic (shared between smart and manual methods)
+    async fn prepare_payment_internal(
+        &self,
+        destination: &str,
+        amount: u64,
+        target_blockchain: Blockchain,
+    ) -> Result<PaymentRequest, WalletError> {
 
         match target_blockchain {
             Blockchain::Bitcoin => {
