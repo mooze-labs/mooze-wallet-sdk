@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::str::FromStr;
-use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use log::warn;
-use bitcoin::{Address as BitcoinAddress, Network as BitcoinNetwork};
+use bitcoin::Address as BitcoinAddress;
 use lightning_invoice::Bolt11Invoice;
 use parking_lot::RwLock;
 use lwk_wollet::elements::Address as ElementsAddress;
@@ -13,31 +12,67 @@ use crate::clients::{WalletClient, bitcoin::BitcoinCtx, breez::BreezCtx, liquid:
 use crate::errors::WalletError;
 use crate::models::*;
 use crate::models::invoices::Invoice;
-use crate::models::payments::PaymentRequest;
+use crate::models::payments::{PaymentRequest, PreparedPayment};
 
-/// Transaction cache for explicit control
+/// Paginated transaction cache for high-volume wallets
 struct TransactionCache {
-    transactions: Vec<WalletTransaction>,
+    recent_transactions: Vec<WalletTransaction>,
+    total_count: usize,
+    page_size: usize,
 }
 
 impl TransactionCache {
     fn new() -> Self {
+        Self::with_page_size(100)
+    }
+
+    fn with_page_size(page_size: usize) -> Self {
         Self {
-            transactions: Vec::new(),
+            recent_transactions: Vec::new(),
+            total_count: 0,
+            page_size,
         }
     }
 
-    fn get(&self) -> Vec<WalletTransaction> {
-        self.transactions.clone()
+    fn get_page(&self, page: usize, page_size: usize) -> Vec<WalletTransaction> {
+        let start = page * page_size;
+        let end = (start + page_size).min(self.recent_transactions.len());
+
+        if start >= self.recent_transactions.len() {
+            Vec::new()
+        } else {
+            self.recent_transactions[start..end].to_vec()
+        }
     }
 
-    fn set(&mut self, transactions: Vec<WalletTransaction>) {
-        self.transactions = transactions;
+    fn set(&mut self, mut transactions: Vec<WalletTransaction>) {
+        self.total_count = transactions.len();
+
+        transactions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        transactions.truncate(self.page_size);
+
+        self.recent_transactions = transactions;
+    }
+
+    fn total_count(&self) -> usize {
+        self.total_count
+    }
+
+    fn has_more(&self) -> bool {
+        self.total_count > self.recent_transactions.len()
+    }
+
+    fn is_valid(&self) -> bool {
+        !self.recent_transactions.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.recent_transactions.clear();
+        self.total_count = 0;
     }
 }
 
-/// Unified wallet that abstracts Bitcoin, Liquid, and Lightning operations
-/// Routes method calls to appropriate contexts based on asset types
+/// Unified wallet supporting Bitcoin, Liquid, and Lightning operations
 pub struct UnifiedWallet {
     bitcoin_ctx: Arc<BitcoinCtx>,
     breez_ctx: Arc<BreezCtx>,
@@ -45,7 +80,6 @@ pub struct UnifiedWallet {
     transaction_cache: Arc<RwLock<TransactionCache>>,
 }
 
-/// Builder pattern for creating UnifiedWallet instances
 pub struct UnifiedWalletBuilder {
     bitcoin_ctx: Option<Arc<BitcoinCtx>>,
     breez_ctx: Option<Arc<BreezCtx>>,
@@ -53,7 +87,6 @@ pub struct UnifiedWalletBuilder {
 }
 
 impl UnifiedWalletBuilder {
-    /// Create a new builder instance
     pub fn new() -> Self {
         Self {
             bitcoin_ctx: None,
@@ -62,25 +95,21 @@ impl UnifiedWalletBuilder {
         }
     }
 
-    /// Set the Bitcoin context
     pub fn with_bitcoin_context(mut self, bitcoin_ctx: Arc<BitcoinCtx>) -> Self {
         self.bitcoin_ctx = Some(bitcoin_ctx);
         self
     }
 
-    /// Set the Breez context
     pub fn with_breez_context(mut self, breez_ctx: Arc<BreezCtx>) -> Self {
         self.breez_ctx = Some(breez_ctx);
         self
     }
 
-    /// Set the Liquid context
     pub fn with_liquid_context(mut self, liquid_ctx: Arc<LwkCtx>) -> Self {
         self.liquid_ctx = Some(liquid_ctx);
         self
     }
 
-    /// Build the UnifiedWallet instance
     pub fn build(self) -> Result<UnifiedWallet, WalletError> {
         let bitcoin_ctx = self.bitcoin_ctx.ok_or_else(|| {
             WalletError::ContextCreationFailed {
@@ -118,27 +147,39 @@ impl UnifiedWallet {
         UnifiedWalletBuilder::new()
     }
 
-    /// Detect blockchain from address format
-    fn detect_blockchain(address: &str) -> Result<Blockchain, WalletError> {
-        // Try Lightning invoice first (most specific)
-        if address.starts_with("lnbc") || address.starts_with("lntb") || address.starts_with("lnbcrt") {
+    async fn detect_blockchain(&self, address: &str) -> Result<Blockchain, WalletError> {
+        if let Ok(_) = self.breez_ctx.parse_address(address).await {
             return Ok(Blockchain::Lightning);
         }
 
-        // Try Bitcoin address parsing
         if let Ok(_) = BitcoinAddress::from_str(address) {
             return Ok(Blockchain::Bitcoin);
         }
 
-        // Try Liquid address (simplified detection)
-        if address.starts_with("lq1") || address.starts_with("VJL") || address.starts_with("VT") || address.starts_with("H") || address.starts_with("Q") {
+        if let Ok(_) = ElementsAddress::from_str(address) {
             return Ok(Blockchain::Liquid);
         }
 
         Err(WalletError::UnrecognizedAddress { address: address.to_string() })
     }
 
-    /// Validate address format with proper checksum validation
+    /// Static detection for testing
+    fn detect_blockchain_static(address: &str) -> Result<Blockchain, WalletError> {
+        if address.starts_with("lnbc") || address.starts_with("lntb") || address.starts_with("lnbcrt") {
+            return Ok(Blockchain::Lightning);
+        }
+
+        if let Ok(_) = BitcoinAddress::from_str(address) {
+            return Ok(Blockchain::Bitcoin);
+        }
+
+        if let Ok(_) = ElementsAddress::from_str(address) {
+            return Ok(Blockchain::Liquid);
+        }
+
+        Err(WalletError::UnrecognizedAddress { address: address.to_string() })
+    }
+
     fn validate_address(address: &str, blockchain: &Blockchain) -> Result<(), WalletError> {
         match blockchain {
             Blockchain::Bitcoin => {
@@ -175,8 +216,6 @@ impl UnifiedWallet {
         breez_ctx: Arc<BreezCtx>,
         liquid_ctx: Arc<LwkCtx>,
     ) -> Result<Self, WalletError> {
-        // Note: Arc validation is not needed here since we already hold valid references
-        // If contexts were invalid, they would have failed during creation
 
         let wallet = UnifiedWallet {
             bitcoin_ctx,
@@ -311,24 +350,18 @@ impl UnifiedWallet {
         }
     }
 
-    /// Smart payment preparation with automatic blockchain detection
-    /// Auto-detects blockchain from address format and validates with proper checksums
+    /// Auto-detect blockchain and prepare payment
     pub async fn prepare_payment_smart(
         &self,
         destination: &str,
         amount: u64,
     ) -> Result<PaymentRequest, WalletError> {
-        // Auto-detect blockchain from address format
-        let detected_blockchain = Self::detect_blockchain(destination)?;
-        
-        // Validate with proper checksum validation
+        let detected_blockchain = self.detect_blockchain(destination).await?;
         Self::validate_address(destination, &detected_blockchain)?;
-        
-        // Use the existing prepare_payment logic
         self.prepare_payment_internal(destination, amount, detected_blockchain).await
     }
 
-    /// Prepare payment with intelligent routing (manual blockchain specification)
+    /// Prepare payment with specified blockchain
     pub async fn prepare_payment(
         &self,
         destination: &str,
@@ -370,7 +403,7 @@ impl UnifiedWallet {
                             destination,
                             amount,
                             Asset::BitcoinOnchain,
-                            prepare_response.fees_sat,
+                            prepare_response.total_fees_sat,
                             Blockchain::Bitcoin,
                             PreparedPayment::PegOut(prepare_response)
                         );
@@ -444,15 +477,17 @@ impl UnifiedWallet {
         }
     }
 
-    /// Get cached transaction history (synchronous, no network calls)
-    /// Returns transactions loaded at initialization or last update
-    pub fn transactions(&self) -> Vec<WalletTransaction> {
+    /// Get transactions with pagination
+    pub fn transactions(&self, page: usize, page_size: usize) -> Vec<WalletTransaction> {
         let cache = self.transaction_cache.read();
-        cache.get()
+        cache.get_page(page, page_size)
+    }
+    pub fn transaction_info(&self) -> (usize, bool) {
+        let cache = self.transaction_cache.read();
+        (cache.total_count(), cache.has_more())
     }
 
-    /// Fetch fresh transactions from all contexts and update cache
-    /// Call this when you want to refresh transaction data
+    /// Refresh transaction cache from all contexts
     pub async fn update_transactions(&self) -> Result<(), WalletError> {
         let fresh_transactions = self.fetch_and_process_transactions().await?;
         
@@ -551,8 +586,7 @@ mod tests {
     
     mock! {
         pub BreezContext {}
-        
-        #[async_trait]
+
         impl WalletClient for BreezContext {
             async fn balance(&self) -> Result<HashMap<Asset, u64>, WalletError>;
             async fn transactions(&self) -> Result<Vec<WalletTransaction>, WalletError>;
@@ -639,6 +673,7 @@ mod tests {
             bitcoin_ctx: Arc::new(mock_bitcoin),
             breez_ctx: Arc::new(mock_breez),
             liquid_ctx: Arc::new(mock_liquid),
+            transaction_cache: Arc::new(RwLock::new(TransactionCache::new())),
         };
         
         let result = wallet.balance().await;
@@ -675,6 +710,7 @@ mod tests {
             bitcoin_ctx: Arc::new(mock_bitcoin),
             breez_ctx: Arc::new(mock_breez),
             liquid_ctx: Arc::new(mock_liquid),
+            transaction_cache: Arc::new(RwLock::new(TransactionCache::new())),
         };
         
         let result = wallet.balance().await;
@@ -719,7 +755,9 @@ mod tests {
         
         // Breez context succeeds with on-chain transaction
         let prepare_response = PreparePayOnchainResponse {
-            fees_sat: 500,
+            receiver_amount_sat: 1500,
+            claim_fees_sat: 100,
+            total_fees_sat: 500,
         };
         mock_breez.expect_build_onchain_transaction()
             .times(1)
@@ -729,6 +767,7 @@ mod tests {
             bitcoin_ctx: Arc::new(mock_bitcoin),
             breez_ctx: Arc::new(mock_breez),
             liquid_ctx: Arc::new(mock_liquid),
+            transaction_cache: Arc::new(RwLock::new(TransactionCache::new())),
         };
         
         let result = wallet.prepare_payment("bc1qtest", 5000, Some(Blockchain::Bitcoin)).await;
@@ -737,8 +776,8 @@ mod tests {
         assert!(result.is_ok());
         let payment_request = result.unwrap();
         assert_eq!(payment_request.blockchain, Blockchain::Bitcoin);
-        assert_eq!(payment_request.asset, Asset::BitcoinOnchain);
-        assert_eq!(payment_request.fee, 500);
+        assert_eq!(payment_request.payee.asset, Asset::BitcoinOnchain);
+        assert_eq!(payment_request.fees, 500);
         match payment_request.prepared_payment {
             PreparedPayment::PegOut(_) => {}, // Expected
             _ => panic!("Expected PegOut prepared payment"),
@@ -990,39 +1029,39 @@ mod tests {
     #[test]
     fn test_address_detection_bitcoin() {
         // Test Bitcoin mainnet addresses
-        assert!(matches!(UnifiedWallet::detect_blockchain("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"), Ok(Blockchain::Bitcoin)));
-        assert!(matches!(UnifiedWallet::detect_blockchain("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"), Ok(Blockchain::Bitcoin)));
-        assert!(matches!(UnifiedWallet::detect_blockchain("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"), Ok(Blockchain::Bitcoin)));
+        assert!(matches!(UnifiedWallet::detect_blockchain_static("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"), Ok(Blockchain::Bitcoin)));
+        assert!(matches!(UnifiedWallet::detect_blockchain_static("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"), Ok(Blockchain::Bitcoin)));
+        assert!(matches!(UnifiedWallet::detect_blockchain_static("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"), Ok(Blockchain::Bitcoin)));
         
         // Test Bitcoin testnet addresses
-        assert!(matches!(UnifiedWallet::detect_blockchain("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"), Ok(Blockchain::Bitcoin)));
-        assert!(matches!(UnifiedWallet::detect_blockchain("m1CDN6TNjEeb6p4ahvCVqaV7cqF7c8qant"), Ok(Blockchain::Bitcoin)));
-        assert!(matches!(UnifiedWallet::detect_blockchain("2MzQwSSnBHWHqSAqtTVQ6v47XtaisrJa1Vc"), Ok(Blockchain::Bitcoin)));
+        assert!(matches!(UnifiedWallet::detect_blockchain_static("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"), Ok(Blockchain::Bitcoin)));
+        assert!(matches!(UnifiedWallet::detect_blockchain_static("m1CDN6TNjEeb6p4ahvCVqaV7cqF7c8qant"), Ok(Blockchain::Bitcoin)));
+        assert!(matches!(UnifiedWallet::detect_blockchain_static("2MzQwSSnBHWHqSAqtTVQ6v47XtaisrJa1Vc"), Ok(Blockchain::Bitcoin)));
     }
 
     #[test]  
     fn test_address_detection_lightning() {
         // Test Lightning invoices
         let lightning_invoice = "lnbc1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaq8rkx3yf5tcsyz3d73gafnh3cax9rn449d9p5uxz9ezhhypd0elx87sjle52x86fux2ypatgddc6k63n7erqz25le42c4u4ecky03ylcqca784w";
-        assert!(matches!(UnifiedWallet::detect_blockchain(lightning_invoice), Ok(Blockchain::Lightning)));
+        assert!(matches!(UnifiedWallet::detect_blockchain_static(lightning_invoice), Ok(Blockchain::Lightning)));
         
         let testnet_invoice = "lntb1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpuaztrnwngzn3kdzw5hydlzf03qdgm2hdq27cqv3agm2awhz5se903vruatfhq77w3ls4evs3ch9zw97j25emudupq63nyw24cg27h2rspfj9srp";
-        assert!(matches!(UnifiedWallet::detect_blockchain(testnet_invoice), Ok(Blockchain::Lightning)));
+        assert!(matches!(UnifiedWallet::detect_blockchain_static(testnet_invoice), Ok(Blockchain::Lightning)));
     }
 
     #[test]
     fn test_address_detection_liquid() {
         // Test Liquid addresses (confidential and non-confidential)
-        assert!(matches!(UnifiedWallet::detect_blockchain("lq1qq2xvpcvfup5j8zscjq05u2wxxjcyewk7979f3mmz5l7uw5pqmx6xf5xy50hsn6vhkm5euwt72x878eq6zxx2z58hd7zrsg9qn"), Ok(Blockchain::Liquid)));
-        assert!(matches!(UnifiedWallet::detect_blockchain("VJLCGjyeqVwMjzrD6dE9r5jGsJJSQq9pNqJdKK7r9M9c5q6TXBwtgNzY1xX1XBzgAx1n1jVjhN9iBLPzP9VBpMz8"), Ok(Blockchain::Liquid))); 
+        assert!(matches!(UnifiedWallet::detect_blockchain_static("lq1qq2xvpcvfup5j8zscjq05u2wxxjcyewk7979f3mmz5l7uw5pqmx6xf5xy50hsn6vhkm5euwt72x878eq6zxx2z58hd7zrsg9qn"), Ok(Blockchain::Liquid)));
+        assert!(matches!(UnifiedWallet::detect_blockchain_static("VJLCGjyeqVwMjzrD6dE9r5jGsJJSQq9pNqJdKK7r9M9c5q6TXBwtgNzY1xX1XBzgAx1n1jVjhN9iBLPzP9VBpMz8"), Ok(Blockchain::Liquid))); 
     }
 
     #[test]
     fn test_address_detection_invalid() {
         // Test invalid addresses
-        assert!(matches!(UnifiedWallet::detect_blockchain("invalid_address"), Err(WalletError::UnrecognizedAddress { .. })));
-        assert!(matches!(UnifiedWallet::detect_blockchain(""), Err(WalletError::UnrecognizedAddress { .. })));
-        assert!(matches!(UnifiedWallet::detect_blockchain("1234567890"), Err(WalletError::UnrecognizedAddress { .. })));
+        assert!(matches!(UnifiedWallet::detect_blockchain_static("invalid_address"), Err(WalletError::UnrecognizedAddress { .. })));
+        assert!(matches!(UnifiedWallet::detect_blockchain_static(""), Err(WalletError::UnrecognizedAddress { .. })));
+        assert!(matches!(UnifiedWallet::detect_blockchain_static("1234567890"), Err(WalletError::UnrecognizedAddress { .. })));
     }
 
     #[test]
@@ -1076,7 +1115,7 @@ mod tests {
         let mut cache = TransactionCache::new();
         
         // Initially empty
-        assert_eq!(cache.get().len(), 0);
+        assert_eq!(cache.get_page(0, 100).len(), 0);
         assert_eq!(cache.is_valid(), false);
         
         // Set some transactions
@@ -1086,14 +1125,14 @@ mod tests {
         ];
         
         cache.set(test_txs.clone());
-        assert_eq!(cache.get().len(), 2);
+        assert_eq!(cache.get_page(0, 100).len(), 2);
         assert_eq!(cache.is_valid(), true);
-        assert_eq!(cache.get()[0].txid, "tx1");
-        assert_eq!(cache.get()[1].txid, "tx2");
+        assert_eq!(cache.get_page(0, 100)[0].txid, "tx1");
+        assert_eq!(cache.get_page(0, 100)[1].txid, "tx2");
         
         // Clear cache
         cache.clear();
-        assert_eq!(cache.get().len(), 0);
+        assert_eq!(cache.get_page(0, 100).len(), 0);
         assert_eq!(cache.is_valid(), false);
     }
 

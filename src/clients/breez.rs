@@ -1,6 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
 
-use anyhow::anyhow;
 use breez_sdk_liquid::{
     model::{ConnectRequest, LiquidNetwork, ListPaymentsRequest, PayAmount, PayOnchainRequest, Payment, PaymentDetails, PaymentState, PreparePayOnchainRequest, PreparePayOnchainResponse, PrepareReceiveRequest, PrepareSendRequest, PrepareSendResponse, ReceiveAmount, ReceivePaymentRequest, SendPaymentRequest, SendPaymentResponse}, 
     sdk::LiquidSdk, InputType
@@ -113,7 +112,7 @@ impl BreezCtx {
         let payment = self.sdk.pay_onchain(
             &PayOnchainRequest {
                 prepare_response,
-                recipient_address: address.to_string()
+                address: address.to_string()
             }
         ).await.map_err(|e| BreezError::TransactionError(e.to_string()))?;
 
@@ -273,9 +272,9 @@ pub async fn prepare_onchain_payment(sdk: Arc<LiquidSdk>, amount: u64) -> Result
 
 pub async fn pay_onchain(sdk: Arc<LiquidSdk>, prepare_response: PreparePayOnchainResponse, address: &str) -> Result<SendPaymentResponse, BreezError> {
     let payment = sdk.pay_onchain(
-        &PayOnchainRequest { 
+        &PayOnchainRequest {
             prepare_response,
-            recipient_address: address.to_string()
+            address: address.to_string()
         }
     ).await.map_err(|e| BreezError::SdkError(e.to_string()))?;
 

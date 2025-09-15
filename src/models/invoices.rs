@@ -1,4 +1,4 @@
-use breez_sdk_liquid::model::{PrepareReceiveResponse, ReceivePaymentResponse};
+use breez_sdk_liquid::model::ReceivePaymentResponse;
 
 pub enum InvoiceType {
     Lightning(ReceivePaymentResponse),
