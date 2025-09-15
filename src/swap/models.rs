@@ -6,19 +6,19 @@ pub enum SwapDirection {
 }
 
 pub struct SwapRequest {
-    from: Asset,
-    to: Asset,
-    swap_direction: SwapDirection,
-    amount: u64,
+    pub from: Asset,
+    pub to: Asset,
+    pub swap_direction: SwapDirection,
+    pub amount: u64,
 }
 
 pub struct SwapRequestResponse {
-    from: Asset,
-    to: Asset,
-    send_amount: u64,
-    recv_amount: u64,
-    fees: u64,
-    expire_at: i64,
+    pub from: Asset,
+    pub to: Asset,
+    pub send_amount: u64,
+    pub recv_amount: u64,
+    pub fees: u64,
+    pub expire_at: i64,
 }
 
 impl SwapRequestResponse {

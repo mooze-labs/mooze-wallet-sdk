@@ -1,19 +1,23 @@
 use thiserror::Error;
 
+use crate::infra::json_rpc;
+
 #[derive(Error, Debug)]
 pub enum SideswapError {
     #[error("WebSocket client error: {0}")]
-    WebSocketError(String),
+    WebSocketError(#[from] json_rpc::RpcError),
+    #[error("Deserialization error: {0}")]
+    DeserializationError(#[from] serde_json::Error),
+    #[error("Connection error: {0}.")]
+    ConnectionError(String),
+    #[error("Format error: {0}")]
+    FormatError(String),
     #[error("Login failed: {0}")]
     LoginError(String),
-    #[error("API call failed: {0}")]
-    ApiCallError(String),
     #[error("Missing result key: {0}")]
     MissingResultKey(String),
     #[error("Sideswap API error response: {0}")]
     ApiResponseError(String),
-    #[error("Deserialization error: {0}")]
-    DeserializationError(String),
     #[error("Failed to get markets: {0}")]
     MarketRetrievalError(String),
     #[error("Failed to start quotes: {0}")]

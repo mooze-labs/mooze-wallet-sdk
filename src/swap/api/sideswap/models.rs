@@ -151,3 +151,10 @@ pub enum QuoteStatus {
         error_msg: String,
     },
 }
+
+pub enum SideswapNotification {
+    Quote {
+        quote_sub_id: i64,
+        status: QuoteStatus
+    }
+}
