@@ -4,7 +4,7 @@ use lwk_common::Signer;
 use lwk_signer::SwSigner;
 use lwk_wollet::{
     blocking::BlockchainBackend,
-    elements::{pset::PartiallySignedTransaction, AssetId}, 
+    elements::{pset::PartiallySignedTransaction, AssetId, OutPoint}, 
     full_scan_with_electrum_client, 
     ElectrumClient, 
     ElectrumUrl, 
@@ -125,6 +125,50 @@ impl LwkCtx {
             Some(update) => self.apply_update(update),
             None => Ok(()),
         }
+    }
+
+    pub(crate) fn sign_with_extra_details(&self, pset: &PartiallySignedTransaction) -> Result<PartiallySignedTransaction, LwkError> {
+        let wollet = self.wollet.write();
+        let mut signed_pset_1 = self.sign_transaction(pset)?;
+
+        for input in signed_pset_1.inputs_mut().iter_mut() {
+            let outpoint = OutPoint {
+                txid: input.previous_txid,
+                vout: input.previous_output_index,
+            };
+            let tx = wollet
+                .transaction(&outpoint.txid)
+                .map_err(|e| {
+                    LwkError::TransactionError(format!(
+                        "Failed to get transaction output: {}",
+                        e.to_string()
+                    ))
+                })?
+                .ok_or_else(|| {
+                    LwkError::TransactionError("Transaction output not found".to_string())
+                })?;
+            let tx_out = tx
+                .tx
+                .output
+                .get(outpoint.vout as usize)
+                .ok_or(LwkError::TransactionError("Output not found".to_string()))?;
+
+            input.in_utxo_rangeproof = tx_out.witness.rangeproof.clone();
+            input.witness_utxo = Some(tx_out.clone());
+        }
+
+        wollet.add_details(&mut signed_pset_1).map_err(|e| {
+            LwkError::TransactionError(format!("Failed to add details: {}", e.to_string()))
+        })?;
+        let mut signed_pset_2 = self.sign_transaction(&signed_pset_1)?;
+
+        for input in signed_pset_2.inputs_mut() {
+            if let Some((public_key, input_sign)) = input.partial_sigs.iter().next() {
+                input.final_script_witness = Some(vec![input_sign.clone(), public_key.to_bytes()]);
+            }
+        }
+
+        Ok(signed_pset_2)
     }
 
     fn apply_update(&self, update: lwk_wollet::Update) -> Result<(), LwkError> {

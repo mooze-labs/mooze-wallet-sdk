@@ -41,7 +41,7 @@ pub enum BdkError {
 pub struct BitcoinCtx {
     config: WalletConfig,
     electrum_client: BdkElectrumClient<Client>,
-    wallet: Arc<RwLock<bdk_wallet::Wallet>>,
+    pub(crate) wallet: Arc<RwLock<bdk_wallet::Wallet>>,
 }
 
 impl BitcoinCtx {
