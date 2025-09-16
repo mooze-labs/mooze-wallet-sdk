@@ -6,6 +6,7 @@ use crate::infra::json_rpc;
 mod error;
 mod models;
 
+use lwk_wollet::WalletTxOut;
 pub use models::*;
 pub use error::*;
 use serde::{de::DeserializeOwned, Serialize};
@@ -100,7 +101,11 @@ impl SideswapClient {
                 }
             },
             Some(r) => {
-                let data: T = serde_json::from_value(r.clone())?;
+                if result_key.is_empty() {
+                    let data: T = serde_json::from_value(r.clone())?;
+                    return Ok(data);
+                }
+                let data: T = serde_json::from_value(r[result_key].clone())?;
                 Ok(data)
             }
         }
@@ -237,16 +242,65 @@ impl SideswapClient {
         quote
     }
 
+    pub async fn peg(&self, peg_in: bool, address: &str) -> Result<PegOrder, SideswapError> {
+        let peg_order: PegOrder = self.call_api("peg", json!({"peg_in": peg_in, "recv_addr": address}), "").await?;
+
+        Ok(peg_order)
+    }
+    pub async fn request_swap(
+        &self, 
+        send_asset: &str, 
+        recv_asset: &str, 
+        amount: u64, 
+        recv_address: &str,
+        change_address: &str,
+        utxos: Vec<WalletTxOut>
+    ) -> Result<QuoteStatus, SideswapError> {
+        let quote = self.fetch_quote(send_asset, recv_asset, amount, recv_address, change_address, utxos).await?;
+
+        match quote {
+            QuoteStatus::Error { error_msg } => Err(SideswapError::ApiResponseError(error_msg)),
+            QuoteStatus::LowBalance { .. } => Err(SideswapError::LowBalance),
+            QuoteStatus::Success { .. } => Ok(quote)
+        }
+    }
+
     /// Fetches the current rate for a given asset on the Sideswap market.
-    /// Uses request_swap() as underlying API call.
+    /// Uses SideswapClient::fetch_quote() as underlying API call.
     pub async fn fetch_current_rate(&self, send_asset: &str, recv_asset: &str, recv_address: &str, change_address: &str) -> Result<f64, SideswapError> {
-        let _ = self.request_swap(
+        let quote = match self.fetch_quote(send_asset, recv_asset, 1_u64 * ASSET_PRECISION, recv_address, change_address, Vec::new()).await? {
+            QuoteStatus::Error { error_msg} => Err(SideswapError::ApiResponseError(error_msg)),
+            QuoteStatus::LowBalance { base_amount, quote_amount, .. } => {
+                let rate = (quote_amount / ASSET_PRECISION) / (base_amount / ASSET_PRECISION);
+                return Ok(rate as f64);
+            },
+            QuoteStatus::Success { base_amount, quote_amount, .. } => {
+                let rate = (quote_amount / ASSET_PRECISION) / (base_amount / ASSET_PRECISION);
+                return Ok(rate as f64);
+            }
+        }?;
+
+        quote
+    }
+
+    /// Requests a quote operation. Waits for a QuoteStatus to appear on the
+    /// watch receiver and returns it.
+    pub async fn fetch_quote(
+        &self, 
+        send_asset: &str, 
+        recv_asset: &str, 
+        amount: u64, 
+        recv_address: &str,
+        change_address: &str,
+        utxos: Vec<WalletTxOut>
+    ) -> Result<QuoteStatus, SideswapError> {
+        let _ = self.start_quote(
             send_asset, 
             recv_asset,
-            1_u64 * ASSET_PRECISION, 
+            amount,
             recv_address, 
             change_address, 
-            Vec::new()
+            utxos
         ).await?;
 
         let mut rx = self.server_status.quote_rx.clone();
@@ -259,33 +313,30 @@ impl SideswapClient {
         .map_err(|e| SideswapError::ChannelSendError(e.to_string()))?
         .clone()
         .ok_or_else(|| SideswapError::ApiResponseError("Quote has not been received.".to_string()))?;
-        
-        let quote: Result<f64, SideswapError> = match quote {
-            QuoteStatus::Error { error_msg} => Err(SideswapError::ApiResponseError(error_msg)),
-            QuoteStatus::LowBalance { base_amount, quote_amount, .. } => {
-                let rate = (quote_amount / ASSET_PRECISION) / (base_amount / ASSET_PRECISION);
-                return Ok(rate as f64);
-            },
-            QuoteStatus::Success { base_amount, quote_amount, .. } => {
-                let rate = (quote_amount / ASSET_PRECISION) / (base_amount / ASSET_PRECISION);
-                return Ok(rate as f64);
-            }
-        };
 
-        quote
+        Ok(quote)
     }
 
-    pub async fn request_swap(
+    async fn start_quote(
         &self, 
         send_asset: &str, 
         recv_asset: &str, 
         amount: u64, 
         recv_address: &str,
         change_address: &str,
-        utxos: Vec<SideswapUtxo>
+        utxos: Vec<WalletTxOut>
     ) -> Result<(), SideswapError> {
         self.stop_quotes().await?;
         let market = self.get_market(send_asset, recv_asset).await?;
+        let utxos = utxos.iter().map(|u| SideswapUtxo {
+            txid: u.outpoint.txid.to_string(),
+            vout: u.outpoint.vout,
+            asset: u.unblinded.asset.to_string(),
+            asset_bf: u.unblinded.asset_bf.to_string(),
+            value: u.unblinded.value,
+            value_bf: u.unblinded.value_bf.to_string(),
+            redeem_script: None
+        }).collect();
 
         let quote_request = QuoteRequest {
             asset_pair: market.asset_pair,

@@ -152,6 +152,14 @@ pub enum QuoteStatus {
     },
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct PegOrder {
+    pub order_id: String,
+    pub peg_addr: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
 pub enum SideswapNotification {
     Quote {
         quote_sub_id: i64,

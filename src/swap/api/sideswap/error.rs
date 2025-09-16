@@ -8,10 +8,14 @@ pub enum SideswapError {
     WebSocketError(#[from] json_rpc::RpcError),
     #[error("Deserialization error: {0}")]
     DeserializationError(#[from] serde_json::Error),
+    #[error("Low balance.")]
+    LowBalance,
     #[error("Connection error: {0}.")]
     ConnectionError(String),
     #[error("Format error: {0}")]
     FormatError(String),
+    #[error("Notification error: {0}")]
+    NotificationError(String),
     #[error("Login failed: {0}")]
     LoginError(String),
     #[error("Missing result key: {0}")]
@@ -28,14 +32,8 @@ pub enum SideswapError {
     QuoteSigningError(String),
     #[error("Missing quote_sub_id in notification")]
     MissingQuoteSubId,
-    #[error("Notification processing error: {0}")]
-    NotificationError(String),
     #[error("Channel send error: {0}")]
     ChannelSendError(String),
-    #[error("PSET parsing error: {0}")]
-    PsetParsingError(String),
-    #[error("Wallet signing error: {0}")]
-    WalletSigningError(String),
     #[error("Connection timeout: {0}")]
     ConnectionTimeout(String),
 }
