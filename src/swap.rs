@@ -52,6 +52,7 @@ impl Swapper {
         Ok(Swapper { wallet_ctx, sideswap_client })
     }
 
+    /// Fetches the current swap rate for a given asset pair.
     pub async fn fetch_swap_rate(&self, send_asset: Asset, receive_asset: Asset) -> Result<f64, SwapError> {
         if (send_asset == Asset::BitcoinOnchain) || (receive_asset == Asset::BitcoinOnchain) {
             return Ok(BOLTZ_SWAP_RATE);
@@ -63,8 +64,8 @@ impl Swapper {
         );
 
         let rate = self.sideswap_client.fetch_current_rate(
-            &get_asset_id(&send_asset)?, 
-            &get_asset_id(&receive_asset)?,
+            &send_asset.asset_id().ok_or_else(|| SwapError::InvalidAsset)?, 
+            &receive_asset.asset_id().ok_or_else(|| SwapError::InvalidAsset)?, 
             &recv_addr?,
             &change_addr?)
             .await?;
@@ -72,6 +73,9 @@ impl Swapper {
         Ok(rate)
     }
 
+    /// Requests a new swap operation. It automatically infers if it is a Liquid asset swap or
+    /// a chain swap (peg-in/peg-out operations). Peg operations are done through Sideswap, with
+    /// future support for Breez/Boltz swaps in the near future.
     pub async fn request_swap(
         &self, 
         swap_request: &SwapRequest
@@ -91,6 +95,8 @@ impl Swapper {
         self.swap_liquid_assets(swap_request).await
     }
 
+    /// Proceeds with a swap. It automatically handles both liquid asset swaps and peg operations through one
+    /// public API.
     pub async fn confirm_swap(&self, swap_request_response: &SwapRequestResponse) -> Result<Swap, SwapError> {
         match swap_request_response.inner {
             SwapInner::SideswapTransfer(_) => self.confirm_sideswap_transfer(swap_request_response).await,

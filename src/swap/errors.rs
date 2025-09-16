@@ -8,6 +8,10 @@ pub enum SwapError {
     SideswapError(#[from] api::sideswap::SideswapError),
     #[error("Wallet error: {0}")]
     WalletError(#[from] WalletError),
+    #[error("Argument error: {0}")]
+    ArgumentError(String),
+    #[error("Context error: {0}")]
+    ContextError(String),
     #[error("Invalid quote")]
     InvalidQuote,
     #[error("Invalid market.")]
@@ -18,8 +22,6 @@ pub enum SwapError {
     DealerUnavailable,
     #[error("Connection error")]
     ConnectionError,
-    #[error("Context error: {0}")]
-    ContextError(String),
     #[error("Insufficient amount.")]
     InsufficientFunds,
     #[error("Invalid asset")]
