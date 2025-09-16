@@ -127,6 +127,8 @@ impl LwkCtx {
         }
     }
 
+    /// Signs a PSET that contains UTXOs owned by different parties e.g. my wallet and another wallet.
+    /// It goes through the UTXOs, adds the wallet's details and returns it to be used on coinjoin operations.
     pub(crate) fn sign_with_extra_details(&self, pset: &PartiallySignedTransaction) -> Result<PartiallySignedTransaction, LwkError> {
         let wollet = self.wollet.write();
         let mut signed_pset_1 = self.sign_transaction(pset)?;
