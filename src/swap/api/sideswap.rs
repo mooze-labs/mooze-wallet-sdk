@@ -26,26 +26,6 @@ const CHECK_INTERVAL_MILLIS: u64 = 100;
 
 const ASSET_PRECISION: u64 = 10_u64.pow(8);
 
-macro_rules! call_sideswap_api {
-    ($self:expr, $method:expr, $params:expr, $result_key:expr, $return_type:ty) => {{
-        let response = $self
-            .rpc_client
-            .call_method($method, Some($params))
-            .await?;
-
-        let maybe_result = response.get("result");
-        if let None = try_result {
-            if let Some(error) = response.get("error") {
-                return Err(SideswapError::ApiResponsError(error.to_string()));
-            } else {
-                return Err(SideswapError::MissingResultKey(result_key.to_string()));
-            }
-        }
-
-        let result = try_result.unwrap();
-    }}
-}
-
 #[derive(Clone)]
 struct ServerStatus {
     quote_tx: watch::Sender<Option<QuoteStatus>>,
