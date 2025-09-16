@@ -2,7 +2,7 @@ use std::sync::{
     Arc, 
     atomic::{AtomicBool, Ordering}
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -18,7 +18,9 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use uuid::Uuid;
 
 type PendingWsRequests = Arc<Mutex<HashMap<String, oneshot::Sender<serde_json::Value>>>>;
-type NotificationQueue = Arc<Mutex<Vec<serde_json::Value>>>;
+type NotificationQueue = Arc<Mutex<VecDeque<serde_json::Value>>>;
+
+const MAX_NOTIFICATION_QUEUE_SIZE: usize = 1000;
 
 #[derive(Debug, Error)]
 pub enum RpcError {
@@ -51,7 +53,7 @@ impl JsonRpcClient {
             url: url.into(),
             sender: Arc::new(Mutex::new(dummy_tx)),
             pending_reqs: Arc::new(Mutex::new(HashMap::new())),
-            notifications: Arc::new(Mutex::new(Vec::new())),
+            notifications: Arc::new(Mutex::new(VecDeque::new())),
             notify: Arc::new(Notify::new()),
             is_connected: Arc::new(AtomicBool::new(false))
         };
@@ -103,7 +105,7 @@ impl JsonRpcClient {
         loop {
             {
                 let mut q = self.notifications.lock().await;
-                if let Some(notif) = q.pop() {
+                if let Some(notif) = q.pop_front() {
                     return notif;
                 }
             }
@@ -176,7 +178,12 @@ impl JsonRpcClient {
                                                         let _ = tx.send(value);
                                                     }
                                                 } else {
-                                                    notifications_r.lock().await.push(value);
+                                                    let mut queue = notifications_r.lock().await;
+                                                    if queue.len() >= MAX_NOTIFICATION_QUEUE_SIZE {
+                                                        queue.pop_front();
+                                                    }
+                                                    queue.push_back(value);
+                                                    drop(queue);
                                                     notify_r.notify_waiters();
                                                 }
                                             }
