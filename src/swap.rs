@@ -26,7 +26,7 @@ const ASSET_PRECISION: u64 = 10_u64.pow(8);
 const MIN_PEG_OUT_AMOUNT: u64 = 25000;
 const MIN_PEG_IN_AMOUNT: u64 = 10000;
 
-const SIDESWAP_PEG_RESERVATION_MINUTES: u64 = 60 * 6;
+const SIDESWAP_PEG_RESERVATION_MINUTES: i64 = 60 * 6;
 
 #[async_trait::async_trait]
 pub trait SwapClient {
@@ -215,7 +215,7 @@ impl Swapper {
             recv_amount: swap_request.amount - fees,
             fees,
             inner: SwapInner::SideswapTransfer(SideswapTransfer::PegIn(peg_in)),
-            expire_at: (chrono::Utc::now() + chrono::Duration::minutes(60)).timestamp() as u64,
+            expire_at: (chrono::Utc::now() + chrono::Duration::minutes(SIDESWAP_PEG_RESERVATION_MINUTES)).timestamp() as u64,
         };
 
         Ok(swap_request)
@@ -251,7 +251,7 @@ impl Swapper {
             recv_amount: swap_request.amount - fees,
             fees,
             inner: SwapInner::SideswapTransfer(SideswapTransfer::PegOut(peg_out)),
-            expire_at: (chrono::Utc::now() + chrono::Duration::minutes(60)).timestamp() as u64,
+            expire_at: (chrono::Utc::now() + chrono::Duration::minutes(SIDESWAP_PEG_RESERVATION_MINUTES)).timestamp() as u64,
         };
 
         Ok(swap_request)
@@ -304,7 +304,7 @@ impl Swapper {
                 },
                 BreezTransfer::PegOut(peg_out) => self.confirm_breez_peg_out(&peg_out).await,
             },
-            _ => Err(SwapError::ContextError("Breez context may only receive breez transfers.".to_string()))
+            _ => Err(SwapError::ArgumentError("Breez context may only receive breez transfers.".to_string()))
         }
     }
 
@@ -342,7 +342,7 @@ impl Swapper {
         if let PaymentDetails::Bitcoin { swap_id, .. } = payment.payment.details {
             return Ok(swap_id);
         } else {
-            return Err(SwapError::ContextError("Payment details are not bitcoin.".to_string()))
+            return Err(SwapError::ArgumentError("Payment details are not bitcoin.".to_string()))
         }
     }
 
@@ -385,7 +385,7 @@ impl Swapper {
                     Ok(Swap::Peg(peg_operation))
                 }
             },
-            _ => Err(SwapError::ContextError("Sideswap operations may only receive sideswap enums".to_string()))
+            _ => Err(SwapError::ArgumentError("Sideswap operations may only receive sideswap enums".to_string()))
         }
     }
 

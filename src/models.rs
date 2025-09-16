@@ -17,6 +17,16 @@ pub enum Asset {
     LiquidAsset(String)
 }
 
+impl Asset {
+    pub fn asset_id(&self) -> Option<String> {
+        match self {
+            Asset::BitcoinLayer2 => Some(lwk_wollet::elements::AssetId::LIQUID_BTC.to_string()),
+            Asset::LiquidAsset(id) => Some(id.clone()),
+            _ => None
+        }
+    }
+}
+
 pub struct AssetBalance {
     pub asset_id: String,
     pub amount: u64
@@ -42,7 +52,7 @@ pub enum Network {
     Lightning
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum NetworkType {
     Mainnet,
     Testnet,
