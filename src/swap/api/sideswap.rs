@@ -21,7 +21,7 @@ const SIDESWAP_TESTNET_URL: &str = "wss://api-testnet.sideswap.io/json-rpc-ws";
 const USER_AGENT: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const TIMEOUT_DURATION_SECS: u64 = 30;
+const TIMEOUT_DURATION_SECS: u64 = 10;
 const CHECK_INTERVAL_MILLIS: u64 = 100;
 
 const ASSET_PRECISION: u64 = 10_u64.pow(8);
@@ -94,6 +94,7 @@ impl SideswapClient {
     pub async fn start(&mut self) -> Result<(), SideswapError> {
         self.wait_for_connection().await?;
         self.login().await?;
+        self.start_notification_listener().await;
 
         *self.is_connected.get_mut() = true;
 
@@ -133,7 +134,7 @@ impl SideswapClient {
         tokio::spawn(async move {
             loop {
                 let notification = rpc_client.wait_for_notification().await;
-                Self::process_notification(notification, &server_status).await;
+                let _ = Self::process_notification(notification, &server_status).await;
             }
         });
     }
@@ -151,7 +152,7 @@ impl SideswapClient {
 
     async fn process_market_notification(params: serde_json::Value, server_status: &ServerStatus) {
         if let Some(quote) = params.get("quote") {
-            Self::update_quote(server_status.quote_tx.clone(), quote);
+            let _ = Self::update_quote(server_status.quote_tx.clone(), quote).await;
         }
     }
 
@@ -251,11 +252,11 @@ impl SideswapClient {
         let quote = match self.fetch_quote(send_asset, recv_asset, 1_u64 * ASSET_PRECISION, recv_address, change_address, Vec::new()).await? {
             QuoteStatus::Error { error_msg} => Err(SideswapError::ApiResponseError(error_msg)),
             QuoteStatus::LowBalance { base_amount, quote_amount, .. } => {
-                let rate = (quote_amount / ASSET_PRECISION) / (base_amount / ASSET_PRECISION);
+                let rate = (quote_amount as f64) / (base_amount as f64);
                 return Ok(rate as f64);
             },
             QuoteStatus::Success { base_amount, quote_amount, .. } => {
-                let rate = (quote_amount / ASSET_PRECISION) / (base_amount / ASSET_PRECISION);
+                let rate = (quote_amount as f64) / (base_amount as f64);
                 return Ok(rate as f64);
             }
         }?;
@@ -381,5 +382,30 @@ impl SideswapClient {
         let result: StartQuotes = self.call_api("market", json!({"start_quotes": quote_request}), "start_quotes").await?;
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::swap::api::sideswap::SideswapClient;
+
+    const LBTC_TESTNET_ID: &str = "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49";
+    const USDT_TESTNET_ID: &str = "b612eb46313a2cd6ebabd8b7a8eed5696e29898b87a43bff41c94f51acef9d73";
+
+    #[tokio::test]
+    /// Tests connection, fetches a quote. In the background it validates that JSON-RPC is working as expected
+    /// and that the swap API is being queried as expected.
+    async fn test_sideswap_connection() {
+        let mut sideswap = SideswapClient::new(false).expect("Failed to connect WebSocket client to Sideswap");
+        sideswap.start().await.unwrap();
+
+        let rate = sideswap.fetch_current_rate(
+            LBTC_TESTNET_ID, 
+            USDT_TESTNET_ID, 
+            "tlq1qqdv7pntgzz5hhw7glwm28vfphmzalzzh37nl7j23lukht2u8y6vl37m7f86qzlwf29s4m63zrdnxycvf4fpmj4a3vcl2pfxv3", 
+            "tlq1qq2kq6keslrpmcpup04wt0exw0hwpw0zt3pdqmn036s4fpf7agdp87t778v73v38az6733fup8zhrsuee3m9rwl52eehkm3u8g"
+        ).await.expect("Failed to get rate.");
+
+        println!("{:?}", rate);
     }
 }
