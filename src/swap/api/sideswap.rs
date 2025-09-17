@@ -14,6 +14,7 @@ use serde_json::json;
 use tokio::sync::{mpsc, RwLock, watch};
 use tokio::time::{Duration, timeout};
 
+// Public API key. Used to declare that swaps come from Mooze users.
 const SIDESWAP_API_KEY: &str = "5c85504bf60e13e0d58614cb9ed86cb2c163cfa402fb3a9e63cf76c7a7af46a1";
 const SIDESWAP_URL: &str = "wss://api.sideswap.io/json-rpc-ws";
 const SIDESWAP_TESTNET_URL: &str = "wss://api-testnet.sideswap.io/json-rpc-ws";
