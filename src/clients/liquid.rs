@@ -15,6 +15,7 @@ use lwk_wollet::{
     Wollet, 
     WolletDescriptor
 };
+use rustls::crypto::CryptoProvider;
 use thiserror::Error;
 use parking_lot::{Mutex, RwLock};
 
@@ -27,7 +28,6 @@ use crate::models::invoices::*;
 use crate::models::payments::*;
 use crate::models::*;
 
-const ELECTRUM_URL: &str = "ssl://electrum.blockstream.info:50002";
 const REGTEST_POLICY_ASSET: &str = "5ac9f65c0efcc4775e0baec4ec03abdde22473cd3cf33c0419ca290e0751b225";
 
 #[derive(Debug, Error)]
@@ -51,12 +51,15 @@ pub struct LwkCtx {
 
 impl LwkCtx {
     pub fn new(mnemonic: &str, config: &WalletConfig) -> Result<Self, anyhow::Error> {
+        rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");
+
         let network = match_elements_network(config);
         let policy_asset = match network {
             ElementsNetwork::Liquid => String::from("6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d"),
             ElementsNetwork::LiquidTestnet => String::from("6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d"),
             _ => String::from(REGTEST_POLICY_ASSET)
         };
+
         let signer = SwSigner::new(mnemonic, network == ElementsNetwork::Liquid)?;
 
         let descriptor: WolletDescriptor = lwk_common::singlesig_desc(&signer, lwk_common::Singlesig::Wpkh, lwk_common::DescriptorBlindingKey::Slip77)
@@ -64,7 +67,7 @@ impl LwkCtx {
             .parse()?;
 
 
-        let electrum_url = ElectrumUrl::new(ELECTRUM_URL, true, true)?;
+        let electrum_url = ElectrumUrl::new(&config.liquid_electrum_url, true, true)?;
         let mut electrum_client = ElectrumClient::new(&electrum_url)?;
         let mut wallet = Wollet::new(network, NoPersist::new(), descriptor)?;
 
@@ -129,7 +132,7 @@ impl LwkCtx {
 
     /// Signs a PSET that contains UTXOs owned by different parties e.g. my wallet and another wallet.
     /// It goes through the UTXOs, adds the wallet's details and returns it to be used on coinjoin operations.
-    pub(crate) fn sign_with_extra_details(&self, pset: &PartiallySignedTransaction) -> Result<PartiallySignedTransaction, LwkError> {
+    pub fn sign_with_extra_details(&self, pset: &PartiallySignedTransaction) -> Result<PartiallySignedTransaction, LwkError> {
         let wollet = self.wollet.write();
         let mut signed_pset_1 = self.sign_transaction(pset)?;
 
@@ -314,5 +317,45 @@ fn match_elements_network(config: &WalletConfig) -> ElementsNetwork {
         NetworkType::Mainnet => ElementsNetwork::Liquid,
         NetworkType::Testnet => ElementsNetwork::LiquidTestnet,
         NetworkType::Regtest => ElementsNetwork::ElementsRegtest { policy_asset: AssetId::from_str(&config.liquid_policy_asset).unwrap() },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LwkCtx;
+    use crate::models::WalletConfig;
+    use crate::clients::WalletClient;
+    use tokio::sync::OnceCell;
+    use std::sync::Arc;
+
+    static LWK_CTX: OnceCell<Arc<LwkCtx>> = OnceCell::const_new();
+
+    async fn get_lwk_ctx() -> Arc<LwkCtx> {
+        LWK_CTX.get_or_init(|| async {
+            let wallet_cfg = WalletConfig::default();
+            let lwk_ctx = LwkCtx::new("uncover theme pepper kingdom credit comfort trumpet nurse riot odor genius close", &wallet_cfg).unwrap();
+            Arc::new(lwk_ctx)
+        }).await.clone()
+    }
+
+    #[tokio::test]
+    async fn test_wallet_instantiation() {
+        let lwk_ctx = get_lwk_ctx().await;
+        let address = lwk_ctx.generate_new_address().unwrap();
+        println!("{:?}", &address);
+    }
+
+    #[tokio::test]
+    async fn test_invoice_generation() {
+        let lwk_ctx = get_lwk_ctx().await;
+        let invoice = lwk_ctx.create_invoice(None, None).await.unwrap();
+        println!("{:?}", invoice)
+    }
+
+    #[tokio::test]
+    async fn test_balance() {
+        let lwk_ctx = get_lwk_ctx().await;
+        let balance = lwk_ctx.balance().await.unwrap();
+        println!("{:?}", balance)
     }
 }
