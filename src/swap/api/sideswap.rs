@@ -387,7 +387,7 @@ impl SideswapClient {
 
 #[cfg(test)]
 mod tests {
-    use crate::swap::api::sideswap::SideswapClient;
+    use crate::{models::WalletConfig, swap::api::sideswap::SideswapClient};
 
     const LBTC_TESTNET_ID: &str = "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49";
     const USDT_TESTNET_ID: &str = "b612eb46313a2cd6ebabd8b7a8eed5696e29898b87a43bff41c94f51acef9d73";
@@ -407,5 +407,16 @@ mod tests {
         ).await.expect("Failed to get rate.");
 
         println!("{:?}", rate);
+    }
+
+    #[tokio::test]
+    async fn test_sideswap_peg() {
+        let address = "lq1qqd99k5m0ywmq08hcwkynhepygp486jh89ez3m89rhmrt8fpds5hwd84xz6t2weaj84c7zse7aj47jy0u63ngy4zczurxztqw4";
+
+        let mut sideswap = SideswapClient::new(true).unwrap();
+        sideswap.start().await.unwrap();
+
+        let peg = sideswap.peg(true, &address).await.unwrap();
+        println!("Order ID: {:?}", &peg.order_id);
     }
 }
