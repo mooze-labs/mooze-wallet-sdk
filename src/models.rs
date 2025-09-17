@@ -10,6 +10,9 @@ const BITCOIN_ELECTRUM_URL: &str = "ssl://mempool.space:50002";
 const LIQUID_ELECTRUM_URL: &str = "ssl://electrum.blockstream.info:50002";
 const WORKING_DIR: &str = "";
 
+pub const USDT_ASSET_ID: &str = "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d";
+pub const DEPIX_ASSET_ID: &str = "02f22f8d9c76ab41661a2729e4752e2c5d1a263012141b86ea98af5472df5189";
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Asset {
     BitcoinOnchain,
