@@ -6,15 +6,28 @@ const STOP_GAP: usize = 20;
 const BATCH_SIZE: usize = 5;
 
 const BREEZ_API_KEY: &str = "MIIBajCCARygAwIBAgIHPgbGnsVq8TAFBgMrZXAwEDEOMAwGA1UEAxMFQnJlZXowHhcNMjUwNDI5MDEyNDI5WhcNMzUwNDI3MDEyNDI5WjArMRMwEQYDVQQKEwpNb296ZSBMYWJzMRQwEgYDVQQDEwtMdWNjYSBHb2RveTAqMAUGAytlcAMhANCD9cvfIDwcoiDKKYdT9BunHLS2/OuKzV8NS0SzqV13o3oweDAOBgNVHQ8BAf8EBAMCBaAwDAYDVR0TAQH/BAIwADAdBgNVHQ4EFgQU2jmj7l5rSw0yVb/vlWAYkK/YBwkwHwYDVR0jBBgwFoAU3qrWklbzjed0khb8TLYgsmsomGswGAYDVR0RBBEwD4ENZGV2QG1vb3plLmFwcDAFBgMrZXADQQAx9hoGj97ubdjFT/C7KqEZOOSVV2C8HHIw4D6//NG9mEJPB1Mc9HTvWmEFaIKhz1vdH6z5zQDyw9RJV4Ej7tEL";
-const BITCOIN_ELECTRUM_URL: &str = "ssl://mempool.space:50002";
-const LIQUID_ELECTRUM_URL: &str = "ssl://electrum.blockstream.info:50002";
+const BITCOIN_ELECTRUM_URL: &str = "bitcoin-mainnet.blockstream.info:50002";
+const LIQUID_ELECTRUM_URL: &str = "elements-mainnet.blockstream.info:50002";
 const WORKING_DIR: &str = "";
+
+pub const USDT_ASSET_ID: &str = "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d";
+pub const DEPIX_ASSET_ID: &str = "02f22f8d9c76ab41661a2729e4752e2c5d1a263012141b86ea98af5472df5189";
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Asset {
     BitcoinOnchain,
     BitcoinLayer2,
     LiquidAsset(String)
+}
+
+impl Asset {
+    pub fn asset_id(&self) -> Option<String> {
+        match self {
+            Asset::BitcoinLayer2 => Some(lwk_wollet::elements::AssetId::LIQUID_BTC.to_string()),
+            Asset::LiquidAsset(id) => Some(id.clone()),
+            _ => None
+        }
+    }
 }
 
 pub struct AssetBalance {
@@ -42,7 +55,7 @@ pub enum Network {
     Lightning
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum NetworkType {
     Mainnet,
     Testnet,
