@@ -1,5 +1,6 @@
 use breez_sdk_liquid::model::{PrepareReceiveResponse, ReceivePaymentResponse};
 
+#[derive(Debug)]
 pub enum InvoiceType {
     Lightning(ReceivePaymentResponse),
     PegIn(ReceivePaymentResponse),
@@ -7,6 +8,7 @@ pub enum InvoiceType {
     Onchain
 }
 
+#[derive(Debug)]
 pub struct Invoice {
     pub address: String, 
     pub invoice_type: InvoiceType,
