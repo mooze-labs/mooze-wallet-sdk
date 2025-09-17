@@ -35,29 +35,32 @@ pub enum RpcError {
 /// A JSON RPC client with automatic reconnection.
 /// It keeps the connection alive and with exponential back-off
 /// if the connection drops.
-pub struct JsonRpcClient { 
+pub struct JsonRpcClient {
     url: String,
     sender: Arc<Mutex<mpsc::UnboundedSender<Message>>>,
     pending_reqs: PendingWsRequests,
     notifications: NotificationQueue,
     notify: Arc<Notify>,
-    is_connected: Arc<AtomicBool>
+    is_connected: Arc<AtomicBool>,
+    shutdown_tx: Option<oneshot::Sender<()>>
 }
 
 impl JsonRpcClient {
     pub fn new(url: &str) -> Result<Self, RpcError> {
         // Dummy sender. We replace this when spawning the connection manager.
         let (dummy_tx, _) = mpsc::unbounded_channel::<Message>();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-        let client = JsonRpcClient {
+        let mut client = JsonRpcClient {
             url: url.into(),
             sender: Arc::new(Mutex::new(dummy_tx)),
             pending_reqs: Arc::new(Mutex::new(HashMap::new())),
             notifications: Arc::new(Mutex::new(VecDeque::new())),
             notify: Arc::new(Notify::new()),
-            is_connected: Arc::new(AtomicBool::new(false))
+            is_connected: Arc::new(AtomicBool::new(false)),
+            shutdown_tx: Some(shutdown_tx)
         };
-        client.spawn_connection_manager();
+        client.spawn_connection_manager(shutdown_rx);
 
         Ok(client)
     } 
@@ -117,8 +120,8 @@ impl JsonRpcClient {
     // Internal – connection manager
     // ------------------------------------------------------------------------
 
-    /// Detached task that owns the reconnect loop forever.
-    fn spawn_connection_manager(&self) {
+    /// Detached task that owns the reconnect loop until shutdown.
+    fn spawn_connection_manager(&mut self, mut shutdown_rx: oneshot::Receiver<()>) {
         let url = self.url.clone();
         let sender_handle = self.sender.clone();
         let pending = self.pending_reqs.clone();
@@ -131,6 +134,11 @@ impl JsonRpcClient {
             let mut backoff = Duration::from_secs(1);
 
             loop {
+                // Check for shutdown signal before attempting connection
+                if shutdown_rx.try_recv().is_ok() {
+                    connected_flag.store(false, Ordering::SeqCst);
+                    return;
+                }
                 match connect_async(&url).await {
                     Ok((ws_stream, _)) => {
                         connected_flag.store(true, Ordering::SeqCst);
@@ -219,11 +227,15 @@ impl JsonRpcClient {
                             }
                         });
 
-                        // Wait until *either* half fails; drop the rest.
+                        // Wait until *either* half fails, shutdown is signaled, or drop the rest.
                         tokio::select! {
                             _ = writer => {},
                             _ = reader => {},
                             _ = pinger => {},
+                            _ = &mut shutdown_rx => {
+                                connected_flag.store(false, Ordering::SeqCst);
+                                return;
+                            }
                         }
 
                         connected_flag.store(false, Ordering::SeqCst);
@@ -234,10 +246,38 @@ impl JsonRpcClient {
                     }
                 }
 
-                // back-off before next dial attempt
-                sleep(backoff).await;
+                // back-off before next dial attempt, but check for shutdown
+                tokio::select! {
+                    _ = sleep(backoff) => {},
+                    _ = &mut shutdown_rx => {
+                        connected_flag.store(false, Ordering::SeqCst);
+                        return;
+                    }
+                }
                 backoff = (backoff * 2).min(Duration::from_secs(30));
             }
         });
+    }
+}
+
+impl Drop for JsonRpcClient {
+    fn drop(&mut self) {
+        // Signal shutdown to the connection manager
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+
+        // Clear pending requests to release any waiting callers
+        if let Ok(mut pending) = self.pending_reqs.try_lock() {
+            pending.clear();
+        }
+
+        // Clear notification queue
+        if let Ok(mut notifications) = self.notifications.try_lock() {
+            notifications.clear();
+        }
+
+        // Set connection status to false
+        self.is_connected.store(false, Ordering::SeqCst);
     }
 }

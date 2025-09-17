@@ -11,7 +11,7 @@ pub use models::*;
 pub use error::*;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::json;
-use tokio::sync::{mpsc, RwLock, watch};
+use tokio::sync::{mpsc, RwLock, watch, oneshot};
 use tokio::time::{Duration, timeout};
 
 // Public API key. Used to declare that swaps come from Mooze users.
@@ -37,6 +37,7 @@ pub(crate) struct SideswapClient {
     is_connected: AtomicBool,
     rpc_client: Arc<json_rpc::JsonRpcClient>,
     server_status: ServerStatus,
+    shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
 impl SideswapClient {
@@ -50,11 +51,13 @@ impl SideswapClient {
         };
 
         let rpc_client = Arc::new(json_rpc::JsonRpcClient::new(url)?);
+        let (shutdown_tx, _) = oneshot::channel();
 
-        Ok(SideswapClient { 
+        Ok(SideswapClient {
             is_connected: AtomicBool::new(false),
-            rpc_client, 
+            rpc_client,
             server_status,
+            shutdown_tx: Some(shutdown_tx),
         })
     }
 
@@ -95,7 +98,11 @@ impl SideswapClient {
     pub async fn start(&mut self) -> Result<(), SideswapError> {
         self.wait_for_connection().await?;
         self.login().await?;
-        self.start_notification_listener().await;
+
+        // Create a new shutdown channel for the notification listener
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        self.shutdown_tx = Some(shutdown_tx);
+        self.start_notification_listener(shutdown_rx).await;
 
         *self.is_connected.get_mut() = true;
 
@@ -128,14 +135,20 @@ impl SideswapClient {
         Ok(())
     }
 
-    async fn start_notification_listener(&self) {
+    async fn start_notification_listener(&self, mut shutdown_rx: oneshot::Receiver<()>) {
         let rpc_client = self.rpc_client.clone();
         let server_status = self.server_status.clone();
 
         tokio::spawn(async move {
             loop {
-                let notification = rpc_client.wait_for_notification().await;
-                let _ = Self::process_notification(notification, &server_status).await;
+                tokio::select! {
+                    notification = rpc_client.wait_for_notification() => {
+                        let _ = Self::process_notification(notification, &server_status).await;
+                    }
+                    _ = &mut shutdown_rx => {
+                        break;
+                    }
+                }
             }
         });
     }
@@ -383,6 +396,18 @@ impl SideswapClient {
         let result: StartQuotes = self.call_api("market", json!({"start_quotes": quote_request}), "start_quotes").await?;
 
         Ok(result)
+    }
+}
+
+impl Drop for SideswapClient {
+    fn drop(&mut self) {
+        // Signal shutdown to the notification listener
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+
+        // Set connection status to false
+        self.is_connected.store(false, Ordering::SeqCst);
     }
 }
 
