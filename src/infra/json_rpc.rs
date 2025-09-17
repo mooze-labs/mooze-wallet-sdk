@@ -141,6 +141,9 @@ impl JsonRpcClient {
                         let (tx, mut rx) = mpsc::unbounded_channel();
                         let pinger_tx = tx.clone();  // Clone before moving tx
 
+                        // clear any pending requests from previous connection
+                        pending.lock().await.clear();
+
                         // make the new sender available to everybody
                         *sender_handle.lock().await = tx.clone();
 
