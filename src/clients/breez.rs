@@ -1,6 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
 
-use anyhow::anyhow;
 use breez_sdk_liquid::{
     model::{ConnectRequest, LiquidNetwork, ListPaymentsRequest, PayAmount, PayOnchainRequest, Payment, PaymentDetails, PaymentState, PreparePayOnchainRequest, PreparePayOnchainResponse, PrepareReceiveRequest, PrepareSendRequest, PrepareSendResponse, ReceiveAmount, ReceivePaymentRequest, SendPaymentRequest, SendPaymentResponse}, 
     sdk::LiquidSdk, InputType
@@ -90,8 +89,34 @@ impl BreezCtx {
         Ok(prepare_response)
     }
 
-    pub async fn build_onchain_transaction(&self, address: &str, amount: u64) -> Result<PrepareSendResponse, BreezError> {
-        todo!()
+    pub async fn build_onchain_transaction(&self, address: &str, amount: u64) -> Result<PreparePayOnchainResponse, BreezError> {
+        let current_limits = self.sdk.fetch_onchain_limits()
+            .await
+            .map_err(|e| BreezError::SdkError(e.to_string()))?;
+
+        if amount < current_limits.send.min_sat {
+            return Err(BreezError::InsufficientOnchainSwapAmount(amount, current_limits.send.min_sat));
+        }
+
+        let prepare_response = self.sdk.prepare_pay_onchain(
+            &PreparePayOnchainRequest {
+                amount: PayAmount::Bitcoin { receiver_amount_sat: amount },
+                fee_rate_sat_per_vbyte: None
+            }
+        ).await.map_err(|e| BreezError::SdkError(e.to_string()))?;
+
+        Ok(prepare_response)
+    }
+
+    pub async fn finalize_onchain_transaction(&self, prepare_response: PreparePayOnchainResponse, address: &str) -> Result<SendPaymentResponse, BreezError> {
+        let payment = self.sdk.pay_onchain(
+            &PayOnchainRequest {
+                prepare_response,
+                address: address.to_string()
+            }
+        ).await.map_err(|e| BreezError::TransactionError(e.to_string()))?;
+
+        Ok(payment)
     }
 
     pub async fn finalize_transaction(&self, prepare_response: PrepareSendResponse, payer_note: Option<String>) -> Result<Payment, BreezError> {
@@ -247,7 +272,10 @@ pub async fn prepare_onchain_payment(sdk: Arc<LiquidSdk>, amount: u64) -> Result
 
 pub async fn pay_onchain(sdk: Arc<LiquidSdk>, prepare_response: PreparePayOnchainResponse, address: &str) -> Result<SendPaymentResponse, BreezError> {
     let payment = sdk.pay_onchain(
-        &PayOnchainRequest { address: address.to_string(), prepare_response }
+        &PayOnchainRequest {
+            prepare_response,
+            address: address.to_string()
+        }
     ).await.map_err(|e| BreezError::SdkError(e.to_string()))?;
 
     Ok(payment)

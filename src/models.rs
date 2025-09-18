@@ -62,6 +62,7 @@ pub enum NetworkType {
     Regtest
 }
 
+#[derive(Clone)]
 pub enum TransactionDirection {
     Incoming,
     Outgoing,
@@ -70,6 +71,7 @@ pub enum TransactionDirection {
     PegOut
 }
 
+#[derive(Clone)]
 pub struct WalletTransaction {
     pub txid: String,
     pub amount: u64,
